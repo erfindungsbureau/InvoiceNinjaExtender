@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Invoice Ninja Erfolgsrechnung Export
-Standalone HTTP server — generates PDF tax reports from Invoice Ninja data.
+InvoiceNinjaExtender — Financial Report Export Server
+Standalone HTTP server — generates PDF income statements from Invoice Ninja data.
+UI language is detected automatically from the Invoice Ninja company settings.
 """
 
 import io, os, json, logging
@@ -32,9 +33,9 @@ CONFIG_PATH = os.environ.get(
 DEFAULT_CONFIG = {
     "in_url":              "https://your-invoiceninja.example.com/api/v1",
     "in_token":            "",
-    "firma":               "Meine Firma",
-    "name":                "Vorname Nachname",
-    "excluded_categories": ["Material aus Lager"],
+    "firma":               "My Company",
+    "name":                "First Last",
+    "excluded_categories": [],
     "port":                5757,
 }
 
@@ -42,7 +43,6 @@ def load_config():
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
             data = json.load(f)
-        # Fill missing keys with defaults
         for k, v in DEFAULT_CONFIG.items():
             data.setdefault(k, v)
         return data
@@ -52,6 +52,151 @@ def save_config(cfg):
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+# ── Translations ───────────────────────────────────────────────────────────────
+# Invoice Ninja language_id: 1=English, 3=German (Deutsch)
+# Add more languages by extending TRANSLATIONS and IN_LANG_MAP.
+IN_LANG_MAP = {
+    "1": "en",   # English
+    "3": "de",   # Deutsch
+    "4": "de",   # Deutsch (some IN versions use 4)
+}
+
+TRANSLATIONS = {
+    "en": {
+        # UI – nav / header
+        "nav_export":           "Export",
+        "nav_settings":         "Settings",
+        "app_title":            "Financial Report Export",
+        # UI – export page
+        "label_tax_year":       "Tax Year",
+        "hint_data_source":     "Data loaded directly from Invoice Ninja",
+        "loading":              "Loading…",
+        "revenue":              "Revenue",
+        "expenses_deduct":      "–  Expenses",
+        "net_profit":           "Net Profit",
+        "net_loss":             "Net Loss",
+        "expenses_by_cat":      "Expenses by Category",
+        "btn_download_pdf":     "Download PDF",
+        "btn_generating_pdf":   "Generating PDF…",
+        "err_server":           "Server not reachable",
+        # UI – settings page
+        "h_connection":         "Invoice Ninja Connection",
+        "label_api_url":        "API Base URL",
+        "hint_api_url":         "Full API URL including /api/v1",
+        "label_api_token":      "API Token",
+        "hint_api_token":       "Found under Settings → API Tokens in Invoice Ninja",
+        "btn_test_conn":        "Test Connection",
+        "conn_ok":              "Connected",
+        "h_general":            "General",
+        "label_company":        "Company Name",
+        "label_owner":          "Owner",
+        "h_categories":         "Categories",
+        "hint_categories":      "excluded categories will not be exported",
+        "loading_cats":         "Loading categories…",
+        "no_cats":              "No categories found – check connection.",
+        "err_loading_cats":     "Error loading categories.",
+        "btn_save":             "Save Settings",
+        "btn_saving":           "Saving…",
+        "saved_ok":             "✓ Saved",
+        # PDF – section headers
+        "pdf_title":            "Income Statement",
+        "pdf_as_of":            "As of",
+        "pdf_sec1":             "1  Revenue (by Payment Date)",
+        "pdf_col_date":         "Date",
+        "pdf_col_client":       "Client",
+        "pdf_col_invoice":      "Invoice No.",
+        "pdf_total_revenue":    "Total Revenue",
+        "pdf_no_payments":      "No payments recorded for this year.",
+        "pdf_sec2":             "2  Expenses (by Category)",
+        "pdf_excluded":         "Excluded:",
+        "pdf_total_expenses":   "Total Expenses",
+        "pdf_uncategorized":    "Uncategorized",
+        "pdf_unassigned":       "Unassigned",
+        "pdf_sec3":             "3  Result",
+        "pdf_revenue":          "Revenue",
+        "pdf_expenses_deduct":  "–  Expenses",
+        "pdf_sec4":             "4  Open Receivables",
+        "pdf_col_invoice_nr":   "Invoice No.",
+        "pdf_col_due":          "Due",
+        "pdf_col_outstanding":  "Outstanding CHF",
+        "pdf_total_open":       "Total outstanding",
+        "pdf_no_open":          "No open receivables.",
+        "pdf_sec5":             "5  Expenses by Category (Overview)",
+        "pdf_total":            "Total",
+        "pdf_created_on":       "Created on",
+        "pdf_data_source":      "Data source: Invoice Ninja",
+    },
+    "de": {
+        # UI – nav / header
+        "nav_export":           "Export",
+        "nav_settings":         "Einstellungen",
+        "app_title":            "Erfolgsrechnung Export",
+        # UI – export page
+        "label_tax_year":       "Steuerjahr",
+        "hint_data_source":     "Daten direkt aus Invoice Ninja",
+        "loading":              "Lade…",
+        "revenue":              "Einnahmen",
+        "expenses_deduct":      "./. Ausgaben",
+        "net_profit":           "Reingewinn",
+        "net_loss":             "Verlust",
+        "expenses_by_cat":      "Ausgaben nach Kategorie",
+        "btn_download_pdf":     "PDF herunterladen",
+        "btn_generating_pdf":   "PDF wird erstellt…",
+        "err_server":           "Server nicht erreichbar",
+        # UI – settings page
+        "h_connection":         "Invoice Ninja Verbindung",
+        "label_api_url":        "API Base URL",
+        "hint_api_url":         "Vollständige API-URL inkl. /api/v1",
+        "label_api_token":      "API Token",
+        "hint_api_token":       "Unter Einstellungen → API-Token in Invoice Ninja",
+        "btn_test_conn":        "Verbindung testen",
+        "conn_ok":              "Verbunden",
+        "h_general":            "Allgemein",
+        "label_company":        "Firmenname",
+        "label_owner":          "Inhaberin / Inhaber",
+        "h_categories":         "Kategorien",
+        "hint_categories":      "ausgeschlossene werden nicht exportiert",
+        "loading_cats":         "Lade Kategorien…",
+        "no_cats":              "Keine Kategorien gefunden – Verbindung prüfen.",
+        "err_loading_cats":     "Fehler beim Laden.",
+        "btn_save":             "Einstellungen speichern",
+        "btn_saving":           "Speichern…",
+        "saved_ok":             "✓ Gespeichert",
+        # PDF – section headers
+        "pdf_title":            "Erfolgsrechnung",
+        "pdf_as_of":            "Stand",
+        "pdf_sec1":             "1  Einnahmen (nach Zahlungseingang)",
+        "pdf_col_date":         "Datum",
+        "pdf_col_client":       "Kunde",
+        "pdf_col_invoice":      "Rechnungsnr.",
+        "pdf_total_revenue":    "Total Einnahmen",
+        "pdf_no_payments":      "Keine Zahlungen in diesem Jahr.",
+        "pdf_sec2":             "2  Ausgaben (nach Kategorie)",
+        "pdf_excluded":         "Ausgeschlossen:",
+        "pdf_total_expenses":   "Total Ausgaben",
+        "pdf_uncategorized":    "Unkategorisiert",
+        "pdf_unassigned":       "Nicht zugewiesen",
+        "pdf_sec3":             "3  Ergebnis",
+        "pdf_revenue":          "Einnahmen",
+        "pdf_expenses_deduct":  "./. Ausgaben",
+        "pdf_sec4":             "4  Offene Forderungen",
+        "pdf_col_invoice_nr":   "Rechnungsnr.",
+        "pdf_col_due":          "Fällig",
+        "pdf_col_outstanding":  "Offen CHF",
+        "pdf_total_open":       "Total offen",
+        "pdf_no_open":          "Keine offenen Forderungen.",
+        "pdf_sec5":             "5  Ausgaben nach Kategorie (Übersicht)",
+        "pdf_total":            "Total",
+        "pdf_created_on":       "Erstellt am",
+        "pdf_data_source":      "Datenquelle: Invoice Ninja",
+    },
+}
+
+def t(key, lang="en"):
+    """Return translated string for key in given language, falling back to English."""
+    return TRANSLATIONS.get(lang, TRANSLATIONS["en"]).get(
+        key, TRANSLATIONS["en"].get(key, key))
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 C_DARK   = colors.HexColor("#1a1a2e")
@@ -90,7 +235,7 @@ def test_connection(base_url, token):
                     headers=make_headers(token),
                     params={"per_page": 1}, timeout=10)
         if r.status_code == 200:
-            return True, "Verbindung erfolgreich"
+            return True, "OK"
         return False, f"HTTP {r.status_code}"
     except Exception as e:
         return False, str(e)
@@ -104,11 +249,32 @@ def get_categories(base_url, token):
     except Exception:
         return []
 
+def get_in_language(cfg):
+    """
+    Detect the language configured in Invoice Ninja via the company API.
+    Returns 'de', 'en', etc.  Falls back to 'en' on any error.
+    IN language_id: 1=English, 3=Deutsch, 4=Deutsch (older versions)
+    """
+    try:
+        r = req.get(f"{cfg['in_url']}/company",
+                    headers=make_headers(cfg["in_token"]),
+                    timeout=8)
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            # language_id may be nested under settings
+            lang_id = (data.get("settings", {}).get("language_id")
+                       or data.get("language_id")
+                       or "1")
+            return IN_LANG_MAP.get(str(lang_id), "en")
+    except Exception:
+        pass
+    return "en"
+
 # ── Data loading ──────────────────────────────────────────────────────────────
-def load_data(cfg, year):
-    base  = cfg["in_url"]
-    token = cfg["in_token"]
-    excl  = set(cfg.get("excluded_categories", []))
+def load_data(cfg, year, lang="en"):
+    base     = cfg["in_url"]
+    token    = cfg["in_token"]
+    excl     = set(cfg.get("excluded_categories", []))
     year_str = str(year)
 
     cats_map = {c["id"]: c.get("name","—")
@@ -118,6 +284,9 @@ def load_data(cfg, year):
                    for v in api_get_all(base, token, "/vendors")}
     clients_map = {c["id"]: c.get("name","—")
                    for c in api_get_all(base, token, "/clients")}
+
+    uncategorized_label = t("pdf_uncategorized", lang)
+    unassigned_label    = t("pdf_unassigned", lang)
 
     # Payments (revenue)
     payments = []
@@ -134,7 +303,7 @@ def load_data(cfg, year):
                 if not client_name:
                     client_name = clients_map.get(inv.get("client_id",""), "")
         if not client_name:
-            client_name = clients_map.get(p.get("client_id",""), "Nicht zugewiesen")
+            client_name = clients_map.get(p.get("client_id",""), unassigned_label)
         payments.append({
             "date":    p.get("date","")[:10],
             "amount":  float(p.get("amount") or 0),
@@ -151,7 +320,7 @@ def load_data(cfg, year):
         if not (e.get("date") or "").startswith(year_str):
             continue
         cid  = e.get("category_id") or ""
-        name = cats_map.get(cid, "Unkategorisiert") if cid else "Unkategorisiert"
+        name = cats_map.get(cid, uncategorized_label) if cid else uncategorized_label
         if name in excl:
             continue
         vid = e.get("vendor_id") or ""
@@ -180,8 +349,8 @@ def load_data(cfg, year):
     open_inv.sort(key=lambda x: x["date"])
     return payments, dict(expenses_by_cat), open_inv
 
-def get_summary(cfg, year):
-    payments, exp_by_cat, _ = load_data(cfg, year)
+def get_summary(cfg, year, lang="en"):
+    payments, exp_by_cat, _ = load_data(cfg, year, lang)
     rev = sum(p["amount"] for p in payments)
     cat_totals = {cat: sum(e["amount"] for e in items)
                   for cat, items in exp_by_cat.items()}
@@ -200,17 +369,18 @@ def fmt_date(d):
     except Exception:
         return d[:10]
 
-def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
+def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
     buf = io.BytesIO()
     W   = A4[0] - 40*mm
     firma = cfg.get("firma","")
     name  = cfg.get("name","")
     excl  = set(cfg.get("excluded_categories",[]))
 
+    pdf_title = t("pdf_title", lang)
     doc = SimpleDocTemplate(buf, pagesize=A4,
         leftMargin=20*mm, rightMargin=20*mm,
         topMargin=20*mm, bottomMargin=20*mm,
-        title=f"Erfolgsrechnung {year} – {name}", author=name)
+        title=f"{pdf_title} {year} – {name}", author=name)
 
     # Styles
     def sty(name_, **kw):
@@ -234,19 +404,19 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
                    fontName="Helvetica", alignment=TA_CENTER)
 
     def section_hdr(title, bg=C_DARK):
-        t = Table([[Paragraph(title, s_sec)]], colWidths=[W])
-        t.setStyle(TableStyle([
+        tbl = Table([[Paragraph(title, s_sec)]], colWidths=[W])
+        tbl.setStyle(TableStyle([
             ("BACKGROUND",    (0,0),(-1,-1), bg),
             ("TOPPADDING",    (0,0),(-1,-1), 4),
             ("BOTTOMPADDING", (0,0),(-1,-1), 4),
             ("LEFTPADDING",   (0,0),(-1,-1), 6),
         ]))
-        return t
+        return tbl
 
     def data_table(rows, col_widths, header=None, total_row=None):
         data = (([header] if header else []) + rows +
                 ([total_row] if total_row else []))
-        t = Table(data, colWidths=col_widths,
+        tbl = Table(data, colWidths=col_widths,
                   repeatRows=1 if header else 0)
         ds = 1 if header else 0
         style = [
@@ -272,41 +442,46 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
             style += [("LINEABOVE",(0,last),(-1,last),0.8,C_ACCENT),
                       ("FONTNAME",(0,last),(-1,last),"Helvetica-Bold"),
                       ("BACKGROUND",(0,last),(-1,last),C_MID)]
-        t.setStyle(TableStyle(style))
-        return t
+        tbl.setStyle(TableStyle(style))
+        return tbl
 
     story = []
 
     # Title
-    story.append(Paragraph(f"Erfolgsrechnung {year}", s_title))
+    story.append(Paragraph(f"{pdf_title} {year}", s_title))
     story.append(Paragraph(
-        f"{name} · {firma} · Stand: {date.today().strftime('%d.%m.%Y')}", s_sub))
+        f"{name} · {firma} · {t('pdf_as_of', lang)}: {date.today().strftime('%d.%m.%Y')}", s_sub))
     story.append(HRFlowable(width=W, thickness=1.5, color=C_DARK, spaceAfter=6*mm))
 
     # 1 — Revenue
     rev_total = sum(p["amount"] for p in payments)
-    story.append(section_hdr("1  Einnahmen (nach Zahlungseingang)"))
+    story.append(section_hdr(t("pdf_sec1", lang)))
     story.append(Spacer(1, 2*mm))
     if payments:
         rows = [[fmt_date(p["date"]), Paragraph(p["client"], s_sm),
                  Paragraph(p["inv_num"], s_sm), chf(p["amount"])]
                 for p in payments]
         story.append(data_table(rows, [22*mm, W*0.42, W*0.28, 28*mm],
-            header=["Datum","Kunde","Rechnungsnr.","CHF"],
-            total_row=["","",Paragraph("Total Einnahmen",s_bold),chf(rev_total)]))
+            header=[t("pdf_col_date",lang), t("pdf_col_client",lang),
+                    t("pdf_col_invoice",lang), "CHF"],
+            total_row=["","",Paragraph(t("pdf_total_revenue",lang),s_bold),
+                       chf(rev_total)]))
     else:
-        story.append(Paragraph("Keine Zahlungen in diesem Jahr.", s_note))
+        story.append(Paragraph(t("pdf_no_payments", lang), s_note))
     story.append(Spacer(1, 6*mm))
 
     # 2 — Expenses
     exp_total, cat_totals = 0.0, {}
-    story.append(section_hdr("2  Ausgaben (nach Kategorie)"))
+    story.append(section_hdr(t("pdf_sec2", lang)))
     story.append(Spacer(1, 2*mm))
     if excl:
-        story.append(Paragraph(f"Ausgeschlossen: {', '.join(sorted(excl))}", s_note))
+        story.append(Paragraph(
+            f"{t('pdf_excluded', lang)} {', '.join(sorted(excl))}", s_note))
 
+    uncategorized_label = t("pdf_uncategorized", lang)
+    unassigned_label    = t("pdf_unassigned", lang)
     sorted_cats = sorted(expenses_by_cat.keys(),
-        key=lambda c: ("z"+c if c in ("Unkategorisiert","Nicht zugewiesen") else c))
+        key=lambda c: ("z"+c if c in (uncategorized_label, unassigned_label) else c))
 
     for cat in sorted_cats:
         items   = expenses_by_cat[cat]
@@ -342,8 +517,9 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
             Spacer(1, 3*mm)
         ]))
 
-    exp_tot = Table([["", Paragraph("Total Ausgaben", s_bold), chf(exp_total)]],
-                    colWidths=[22*mm, W-22*mm-28*mm, 28*mm])
+    exp_tot = Table(
+        [["", Paragraph(t("pdf_total_expenses", lang), s_bold), chf(exp_total)]],
+        colWidths=[22*mm, W-22*mm-28*mm, 28*mm])
     exp_tot.setStyle(TableStyle([
         ("ALIGN",      (2,0),(2,0),"RIGHT"),
         ("FONTNAME",   (0,0),(-1,-1),"Helvetica-Bold"),
@@ -358,12 +534,12 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
     # 3 — Result
     profit = rev_total - exp_total
     pc = C_GREEN if profit >= 0 else C_RED
-    pl = "Reingewinn" if profit >= 0 else "Verlust"
-    story.append(section_hdr("3  Ergebnis", bg=colors.HexColor("#16213e")))
+    pl = t("net_profit" if profit >= 0 else "net_loss", lang)
+    story.append(section_hdr(t("pdf_sec3", lang), bg=colors.HexColor("#16213e")))
     story.append(Spacer(1, 2*mm))
     res = Table([
-        ["Einnahmen", chf(rev_total)],
-        ["./. Ausgaben", chf(exp_total)],
+        [t("pdf_revenue", lang),         chf(rev_total)],
+        [t("pdf_expenses_deduct", lang),  chf(exp_total)],
         [Paragraph(f"<b>{pl} {year}</b>",
                    sty("pl", fontSize=11, fontName="Helvetica-Bold", textColor=pc)),
          Paragraph(f"<b>{chf(profit)}</b>",
@@ -387,7 +563,7 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
     story.append(Spacer(1, 8*mm))
 
     # 4 — Open receivables
-    story.append(section_hdr("4  Offene Forderungen",
+    story.append(section_hdr(t("pdf_sec4", lang),
                               bg=colors.HexColor("#2d4a6e")))
     story.append(Spacer(1, 2*mm))
     if open_invoices:
@@ -396,20 +572,22 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
                  fmt_date(i["date"]), fmt_date(i["due_date"]),
                  chf(i["balance"])] for i in open_invoices]
         story.append(data_table(rows, [25*mm, W*0.38, 22*mm, 22*mm, 26*mm],
-            header=["Rechnungsnr.","Kunde","Datum","Fällig","Offen CHF"],
-            total_row=["","","",Paragraph("Total offen",s_bold),
+            header=[t("pdf_col_invoice_nr",lang), t("pdf_col_client",lang),
+                    t("pdf_col_date",lang), t("pdf_col_due",lang),
+                    t("pdf_col_outstanding",lang)],
+            total_row=["","","",Paragraph(t("pdf_total_open",lang),s_bold),
                         chf(open_total)]))
     else:
-        story.append(Paragraph("Keine offenen Forderungen.", s_note))
+        story.append(Paragraph(t("pdf_no_open", lang), s_note))
     story.append(Spacer(1, 8*mm))
 
     # 5 — Category summary
-    story.append(section_hdr("5  Ausgaben nach Kategorie (Übersicht)",
+    story.append(section_hdr(t("pdf_sec5", lang),
                               bg=colors.HexColor("#374151")))
     story.append(Spacer(1, 2*mm))
     sum_rows = [[Paragraph(c, s_normal), chf(cat_totals[c])]
                 for c in sorted_cats]
-    sum_rows.append([Paragraph("Total", s_bold), chf(exp_total)])
+    sum_rows.append([Paragraph(t("pdf_total", lang), s_bold), chf(exp_total)])
     sum_tbl = Table(sum_rows, colWidths=[W*0.7, W*0.3])
     ss = [("ALIGN",(1,0),(1,-1),"RIGHT"),("FONTNAME",(0,0),(-1,-1),"Helvetica"),
           ("FONTSIZE",(0,0),(-1,-1),9),("TOPPADDING",(0,0),(-1,-1),3),
@@ -431,8 +609,9 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices):
     story.append(Spacer(1, 2*mm))
     base_host = cfg["in_url"].replace("/api/v1","")
     story.append(Paragraph(
-        f"Erstellt am {date.today().strftime('%d.%m.%Y')} · {name} · {firma} · "
-        f"Datenquelle: Invoice Ninja ({base_host})", s_foot))
+        f"{t('pdf_created_on', lang)} {date.today().strftime('%d.%m.%Y')} · "
+        f"{name} · {firma} · {t('pdf_data_source', lang)} ({base_host})",
+        s_foot))
 
     doc.build(story)
     return buf.getvalue()
@@ -505,10 +684,14 @@ h3 { font-size: 1rem; margin-bottom: 14px; color: #1a1a2e }
 .badge.ok { background:#d1fae5; color:#065f46 }
 """
 
-def render_page(title, active, body_html, firma=""):
+def render_page(title, active, body_html, firma="", lang="en"):
     subtitle = f"{firma} · Invoice Ninja" if firma else "Invoice Ninja"
+    html_lang = lang  # e.g. "de", "en"
+    nav_export   = t("nav_export", lang)
+    nav_settings = t("nav_settings", lang)
+    app_title    = t("app_title", lang)
     return f"""<!DOCTYPE html>
-<html lang="de">
+<html lang="{html_lang}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -519,12 +702,12 @@ def render_page(title, active, body_html, firma=""):
 <div class="card">
   <div class="header">
     <div>
-      <h1>📊 Erfolgsrechnung Export</h1>
+      <h1>📊 {app_title}</h1>
       <p>{subtitle}</p>
     </div>
     <nav>
-      <a href="/" class="{'active' if active=='export' else ''}">Export</a>
-      <a href="/settings" class="{'active' if active=='settings' else ''}">Einstellungen</a>
+      <a href="/" class="{'active' if active=='export' else ''}">{nav_export}</a>
+      <a href="/settings" class="{'active' if active=='settings' else ''}">{nav_settings}</a>
     </nav>
   </div>
   <div class="body">
@@ -534,157 +717,180 @@ def render_page(title, active, body_html, firma=""):
 </body>
 </html>"""
 
-EXPORT_BODY = r"""
-<label for="yr">Steuerjahr</label>
+def build_export_body(lang="en"):
+    return f"""
+<label for="yr">{t('label_tax_year', lang)}</label>
 <select id="yr" onchange="loadPreview()">YEAR_OPTIONS</select>
-<div class="hint">Daten direkt aus Invoice Ninja</div>
+<div class="hint">{t('hint_data_source', lang)}</div>
 <div id="preview"></div>
 <button class="btn btn-primary" id="btn" onclick="startDl()" style="width:100%;justify-content:center;margin-top:20px">
   <span class="spinner" id="sp"></span>
-  <span id="bl">PDF herunterladen</span>
+  <span id="bl">{t('btn_download_pdf', lang)}</span>
 </button>
 <script>
-function fmt(v){return"CHF "+v.toLocaleString('de-CH',{minimumFractionDigits:2,maximumFractionDigits:2})}
-async function loadPreview(){
+const LBL_LOADING      = {json.dumps(t('loading', lang))};
+const LBL_REVENUE      = {json.dumps(t('revenue', lang))};
+const LBL_EXPENSES     = {json.dumps(t('expenses_deduct', lang))};
+const LBL_PROFIT       = {json.dumps(t('net_profit', lang))};
+const LBL_LOSS         = {json.dumps(t('net_loss', lang))};
+const LBL_CATS         = {json.dumps(t('expenses_by_cat', lang))};
+const LBL_DL           = {json.dumps(t('btn_download_pdf', lang))};
+const LBL_GENERATING   = {json.dumps(t('btn_generating_pdf', lang))};
+const LBL_ERR_SERVER   = {json.dumps(t('err_server', lang))};
+
+function fmt(v){{return"CHF "+v.toLocaleString('de-CH',{{minimumFractionDigits:2,maximumFractionDigits:2}})}}
+async function loadPreview(){{
   const yr=document.getElementById('yr').value;
   const pv=document.getElementById('preview');
-  pv.innerHTML='<div style="text-align:center;padding:20px;color:#888;font-size:.875rem">Lade…</div>';
-  try{
+  pv.innerHTML='<div style="text-align:center;padding:20px;color:#888;font-size:.875rem">'+LBL_LOADING+'</div>';
+  try{{
     const r=await fetch('/summary?year='+yr);
     const d=await r.json();
-    if(d.error){pv.innerHTML=`<div class="alert alert-err" style="display:block">✗ ${d.error}</div>`;return}
+    if(d.error){{pv.innerHTML=`<div class="alert alert-err" style="display:block">✗ ${{d.error}}</div>`;return}}
     const profit=d.revenue-d.expenses;
-    const pc=profit>=0?'profit':'loss', pl=profit>=0?'Reingewinn':'Verlust';
+    const pc=profit>=0?'profit':'loss', pl=profit>=0?LBL_PROFIT:LBL_LOSS;
     const sorted=Object.entries(d.categories).sort((a,b)=>b[1]-a[1]);
     let rows='';
-    sorted.forEach(([c,v])=>rows+=`<tr><td>${c}</td><td>${fmt(v)}</td></tr>`);
+    sorted.forEach(([c,v])=>rows+=`<tr><td>${{c}}</td><td>${{fmt(v)}}</td></tr>`);
     pv.innerHTML=`
       <div class="divider"></div>
       <div class="summary">
-        <div class="row total"><span>Einnahmen</span><span>${fmt(d.revenue)}</span></div>
-        <div class="row total"><span>./. Ausgaben</span><span>${fmt(d.expenses)}</span></div>
-        <div class="row ${pc}"><span>${pl} ${d.year}</span><span>${fmt(profit)}</span></div>
-        <div class="cat-section">Ausgaben nach Kategorie</div>
-        <table>${rows}</table>
+        <div class="row total"><span>${{LBL_REVENUE}}</span><span>${{fmt(d.revenue)}}</span></div>
+        <div class="row total"><span>${{LBL_EXPENSES}}</span><span>${{fmt(d.expenses)}}</span></div>
+        <div class="row ${{pc}}"><span>${{pl}} ${{d.year}}</span><span>${{fmt(profit)}}</span></div>
+        <div class="cat-section">${{LBL_CATS}}</div>
+        <table>${{rows}}</table>
       </div>`;
-  }catch(e){pv.innerHTML='<div class="alert alert-err" style="display:block">✗ Server nicht erreichbar</div>';}
-}
-function startDl(){
+  }}catch(e){{pv.innerHTML='<div class="alert alert-err" style="display:block">✗ '+LBL_ERR_SERVER+'</div>';}}
+}}
+function startDl(){{
   const yr=document.getElementById('yr').value;
   const btn=document.getElementById('btn');
   const sp=document.getElementById('sp');
   const bl=document.getElementById('bl');
-  btn.disabled=true; sp.style.display='block'; bl.textContent='PDF wird erstellt…';
+  btn.disabled=true; sp.style.display='block'; bl.textContent=LBL_GENERATING;
   const a=document.createElement('a');
   a.href='/export?year='+yr;
-  a.download='Erfolgsrechnung_'+yr+'.pdf';
+  a.download='FinancialReport_'+yr+'.pdf';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  setTimeout(()=>{btn.disabled=false;sp.style.display='none';bl.textContent='PDF herunterladen';},4000);
-}
+  setTimeout(()=>{{btn.disabled=false;sp.style.display='none';bl.textContent=LBL_DL;}},4000);
+}}
 window.addEventListener('DOMContentLoaded',loadPreview);
 </script>
 """
 
-SETTINGS_BODY = r"""
+def build_settings_body(cfg, lang="en"):
+    excl_json   = json.dumps(cfg.get("excluded_categories",[]))
+    in_url_val  = cfg.get("in_url","")
+    in_token_val = cfg.get("in_token","")
+    firma_val   = cfg.get("firma","")
+    name_val    = cfg.get("name","")
+    return f"""
 <form id="sf" onsubmit="return false">
-  <h3>Invoice Ninja Verbindung</h3>
-  <label>API Base URL</label>
-  <input id="in_url" type="url" placeholder="https://invoices.example.com/api/v1" value="IN_URL_VAL">
-  <div class="hint">Vollständige API-URL inkl. /api/v1</div>
-  <label>API Token</label>
-  <input id="in_token" type="password" placeholder="••••••••" value="IN_TOKEN_VAL"
+  <h3>{t('h_connection', lang)}</h3>
+  <label>{t('label_api_url', lang)}</label>
+  <input id="in_url" type="url" placeholder="https://invoices.example.com/api/v1" value="{in_url_val}">
+  <div class="hint">{t('hint_api_url', lang)}</div>
+  <label>{t('label_api_token', lang)}</label>
+  <input id="in_token" type="password" placeholder="••••••••" value="{in_token_val}"
          onfocus="this.type='text'" onblur="this.type='password'">
-  <div class="hint">Unter Einstellungen → API-Token in Invoice Ninja</div>
+  <div class="hint">{t('hint_api_token', lang)}</div>
   <div style="margin-bottom:16px">
-    <button class="btn btn-secondary" onclick="testConn()">Verbindung testen</button>
+    <button class="btn btn-secondary" onclick="testConn()">{t('btn_test_conn', lang)}</button>
     <span id="conn_status" style="margin-left:12px;font-size:.85rem"></span>
   </div>
   <div class="divider"></div>
-  <h3>Allgemein</h3>
+  <h3>{t('h_general', lang)}</h3>
   <div class="field-group">
     <div>
-      <label>Firmenname</label>
-      <input id="firma" type="text" value="FIRMA_VAL">
+      <label>{t('label_company', lang)}</label>
+      <input id="firma" type="text" value="{firma_val}">
     </div>
     <div>
-      <label>Inhaberin / Inhaber</label>
-      <input id="name" type="text" value="NAME_VAL">
+      <label>{t('label_owner', lang)}</label>
+      <input id="name" type="text" value="{name_val}">
     </div>
   </div>
   <div class="divider"></div>
-  <h3>Kategorien <span style="font-weight:400;font-size:.85rem;color:#888">— ausgeschlossene werden nicht exportiert</span></h3>
-  <div id="cats_loading" style="color:#888;font-size:.875rem;margin-bottom:16px">Lade Kategorien…</div>
+  <h3>{t('h_categories', lang)} <span style="font-weight:400;font-size:.85rem;color:#888">— {t('hint_categories', lang)}</span></h3>
+  <div id="cats_loading" style="color:#888;font-size:.875rem;margin-bottom:16px">{t('loading_cats', lang)}</div>
   <div class="check-grid" id="cats"></div>
   <div style="display:flex;gap:12px;margin-top:8px">
     <button class="btn btn-primary" onclick="saveSettings()">
       <span class="spinner" id="save_sp"></span>
-      <span id="save_bl">Einstellungen speichern</span>
+      <span id="save_bl">{t('btn_save', lang)}</span>
     </button>
   </div>
   <div class="alert alert-ok"  id="ok_msg"></div>
   <div class="alert alert-err" id="err_msg"></div>
 </form>
 <script>
-const excluded = new Set(EXCLUDED_JSON);
+const excluded = new Set({excl_json});
+const LBL_NO_CATS     = {json.dumps(t('no_cats', lang))};
+const LBL_ERR_CATS    = {json.dumps(t('err_loading_cats', lang))};
+const LBL_CONN_OK     = {json.dumps(t('conn_ok', lang))};
+const LBL_SAVE        = {json.dumps(t('btn_save', lang))};
+const LBL_SAVING      = {json.dumps(t('btn_saving', lang))};
+const LBL_SAVED_OK    = {json.dumps(t('saved_ok', lang))};
 
-async function loadCats(){
-  try{
+async function loadCats(){{
+  try{{
     const r=await fetch('/api/categories');
     const d=await r.json();
     document.getElementById('cats_loading').style.display='none';
     const grid=document.getElementById('cats');
-    d.forEach(c=>{
+    d.forEach(c=>{{
       const isExcl=excluded.has(c.name);
       const el=document.createElement('label');
       el.className='check-item'+(isExcl?' excluded':'');
-      el.innerHTML=`<input type="checkbox" value="${c.name}" ${isExcl?'checked':''} onchange="toggleExcl(this)"> ${c.name}`;
+      el.innerHTML=`<input type="checkbox" value="${{c.name}}" ${{isExcl?'checked':''}} onchange="toggleExcl(this)"> ${{c.name}}`;
       grid.appendChild(el);
-    });
-    if(!d.length) document.getElementById('cats_loading').textContent='Keine Kategorien gefunden – Verbindung prüfen.';
-  }catch(e){
-    document.getElementById('cats_loading').textContent='Fehler beim Laden.';
-  }
-}
+    }});
+    if(!d.length) document.getElementById('cats_loading').textContent=LBL_NO_CATS;
+  }}catch(e){{
+    document.getElementById('cats_loading').textContent=LBL_ERR_CATS;
+  }}
+}}
 
-function toggleExcl(cb){
+function toggleExcl(cb){{
   cb.closest('label').className='check-item'+(cb.checked?' excluded':'');
-}
+}}
 
-async function testConn(){
+async function testConn(){{
   document.getElementById('conn_status').textContent='…';
-  const r=await fetch('/api/test',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({in_url:document.getElementById('in_url').value,
-                         in_token:document.getElementById('in_token').value})});
+  const r=await fetch('/api/test',{{
+    method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{in_url:document.getElementById('in_url').value,
+                         in_token:document.getElementById('in_token').value}})}});
   const d=await r.json();
   const el=document.getElementById('conn_status');
   el.innerHTML=d.ok
-    ?'<span class="badge ok">✓ Verbunden</span>'
-    :`<span class="badge">✗ ${d.message}</span>`;
-}
+    ?`<span class="badge ok">✓ ${{LBL_CONN_OK}}</span>`
+    :`<span class="badge">✗ ${{d.message}}</span>`;
+}}
 
-async function saveSettings(){
+async function saveSettings(){{
   const btn=document.getElementById('save_bl');
   const sp=document.getElementById('save_sp');
-  sp.style.display='block'; btn.textContent='Speichern…';
+  sp.style.display='block'; btn.textContent=LBL_SAVING;
   const excl=[...document.querySelectorAll('#cats input:checked')].map(e=>e.value);
-  const cfg={
+  const cfg={{
     in_url:    document.getElementById('in_url').value,
     in_token:  document.getElementById('in_token').value,
     firma:     document.getElementById('firma').value,
     name:      document.getElementById('name').value,
     excluded_categories: excl,
-  };
-  const r=await fetch('/api/settings',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+  }};
+  const r=await fetch('/api/settings',{{method:'POST',
+    headers:{{'Content-Type':'application/json'}},body:JSON.stringify(cfg)}});
   const d=await r.json();
-  sp.style.display='none'; btn.textContent='Einstellungen speichern';
+  sp.style.display='none'; btn.textContent=LBL_SAVE;
   const ok=document.getElementById('ok_msg');
   const err=document.getElementById('err_msg');
-  if(d.ok){ok.textContent='✓ Gespeichert'; ok.style.display='block';
-            err.style.display='none'; setTimeout(()=>ok.style.display='none',3000);}
-  else{err.textContent='✗ '+d.error; err.style.display='block'; ok.style.display='none';}
-}
+  if(d.ok){{ok.textContent=LBL_SAVED_OK; ok.style.display='block';
+            err.style.display='none'; setTimeout(()=>ok.style.display='none',3000);}}
+  else{{err.textContent='✗ '+d.error; err.style.display='block'; ok.style.display='none';}}
+}}
 
 window.addEventListener('DOMContentLoaded',loadCats);
 </script>
@@ -720,33 +926,28 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         path   = parsed.path
         cfg    = load_config()
+        lang   = get_in_language(cfg)
 
         if path in ("/", "/index.html"):
             cur  = date.today().year
             opts = "\n".join(
                 f'<option value="{y}"{"selected" if y==cur else ""}>{y}</option>'
                 for y in range(cur, 2017, -1))
-            body = EXPORT_BODY.replace("YEAR_OPTIONS", opts)
-            html = render_page("Erfolgsrechnung Export", "export", body,
-                               cfg.get("firma",""))
+            body = build_export_body(lang).replace("YEAR_OPTIONS", opts)
+            html = render_page(t("app_title", lang), "export", body,
+                               cfg.get("firma",""), lang)
             self.send_html(html)
 
         elif path == "/settings":
-            excl_json = json.dumps(cfg.get("excluded_categories",[]))
-            body = (SETTINGS_BODY
-                    .replace("IN_URL_VAL",    cfg.get("in_url",""))
-                    .replace("IN_TOKEN_VAL",  cfg.get("in_token",""))
-                    .replace("FIRMA_VAL",     cfg.get("firma",""))
-                    .replace("NAME_VAL",      cfg.get("name",""))
-                    .replace("EXCLUDED_JSON", excl_json))
-            html = render_page("Einstellungen", "settings", body,
-                               cfg.get("firma",""))
+            body = build_settings_body(cfg, lang)
+            html = render_page(t("nav_settings", lang), "settings", body,
+                               cfg.get("firma",""), lang)
             self.send_html(html)
 
         elif path == "/summary":
             year = int(params.get("year", [date.today().year])[0])
             try:
-                rev, exp, profit, cats = get_summary(cfg, year)
+                rev, exp, profit, cats = get_summary(cfg, year, lang)
                 self.send_json({"year": year, "revenue": rev,
                                 "expenses": exp, "profit": profit,
                                 "categories": cats})
@@ -756,9 +957,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/export":
             year = int(params.get("year", [date.today().year])[0])
             try:
-                payments, exp_by_cat, open_inv = load_data(cfg, year)
-                pdf_bytes = build_pdf(cfg, year, payments, exp_by_cat, open_inv)
-                fname = f"Erfolgsrechnung_{year}.pdf"
+                payments, exp_by_cat, open_inv = load_data(cfg, year, lang)
+                pdf_bytes = build_pdf(cfg, year, payments, exp_by_cat,
+                                      open_inv, lang)
+                fname = f"FinancialReport_{year}.pdf"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/pdf")
                 self.send_header("Content-Disposition",
@@ -766,7 +968,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", len(pdf_bytes))
                 self.end_headers()
                 self.wfile.write(pdf_bytes)
-                log.info(f"PDF {fname} geliefert ({len(pdf_bytes)//1024} KB)")
+                log.info(f"PDF {fname} delivered ({len(pdf_bytes)//1024} KB)")
             except Exception as e:
                 log.error(f"PDF error: {e}")
                 self.send_json({"error": str(e)}, 500)
@@ -796,7 +998,7 @@ class Handler(BaseHTTPRequestHandler):
                     "in_url":              body.get("in_url", cfg["in_url"]),
                     "in_token":            body.get("in_token", cfg["in_token"]),
                     "firma":               body.get("firma", cfg["firma"]),
-                    "name":               body.get("name", cfg["name"]),
+                    "name":                body.get("name", cfg["name"]),
                     "excluded_categories": body.get("excluded_categories",
                                                     cfg["excluded_categories"]),
                 })
@@ -814,6 +1016,6 @@ if __name__ == "__main__":
     cfg  = load_config()
     port = cfg.get("port", 5757)
     server = HTTPServer(("0.0.0.0", port), Handler)
-    log.info(f"Server gestartet auf http://0.0.0.0:{port}")
+    log.info(f"Server started on http://0.0.0.0:{port}")
     log.info(f"Config: {CONFIG_PATH}")
     server.serve_forever()
