@@ -1,0 +1,8 @@
+{
+  "in_url": "https://your-invoiceninja.example.com/api/v1",
+  "in_token": "your-api-token-here",
+  "firma": "Meine Firma GmbH",
+  "name": "Vorname Nachname",
+  "excluded_categories": ["Material aus Lager"],
+  "port": 5757
+}

@@ -1,0 +1,15 @@
+services:
+  steuerexport:
+    build: .
+    container_name: in-steuerexport
+    restart: unless-stopped
+    ports:
+      - "5757:5757"
+    volumes:
+      # Config is persisted here — survives container updates
+      - ./config:/app/config
+    environment:
+      - CONFIG_PATH=/app/config/settings.json
+      # Optional: override via env instead of the settings UI
+      # - IN_TOKEN=your-token-here
+      # - IN_BASE=https://your-invoiceninja.example.com/api/v1
