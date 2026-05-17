@@ -934,7 +934,12 @@ window.addEventListener('DOMContentLoaded',loadCats);
 """
 
 # ── Login page ────────────────────────────────────────────────────────────────
-def build_login_page(error: str = "") -> str:
+def build_login_page(error: str = "", prefill_url: str = "") -> str:
+    cfg      = load_config()
+    url_val  = prefill_url or cfg.get("in_url", "")
+    # Don't pre-fill the placeholder default
+    if "example.com" in url_val:
+        url_val = ""
     err_html = (f'<div class="alert alert-err" style="display:block">✗ {error}</div>'
                 if error else "")
     return f"""<!DOCTYPE html>
@@ -945,7 +950,7 @@ def build_login_page(error: str = "") -> str:
 <title>Login – InvoiceNinjaExtender</title>
 <style>
 {COMMON_CSS}
-.login-wrap {{ max-width: 400px; margin: 80px auto; background: #fff;
+.login-wrap {{ max-width: 420px; margin: 60px auto; background: #fff;
                border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,.12);
                overflow: hidden }}
 .login-head {{ background: #1a1a2e; color: #fff; padding: 28px 32px; text-align: center }}
@@ -962,14 +967,17 @@ def build_login_page(error: str = "") -> str:
     <p>Financial Report Export</p>
   </div>
   <div class="login-body">
-    <p>Enter your <strong>Invoice Ninja API token</strong> to sign in.<br>
+    <p>Sign in with your <strong>Invoice Ninja API token</strong>.<br>
        Find it under <em>Settings → API Tokens</em> in Invoice Ninja.</p>
     <form method="POST" action="/login">
+      <label>Invoice Ninja URL</label>
+      <input type="url" name="in_url" placeholder="https://invoices.example.com/api/v1"
+             value="{url_val}" autocomplete="url" required>
       <label>API Token</label>
       <input type="password" name="token" placeholder="••••••••••••"
-             autofocus autocomplete="current-password"
+             autocomplete="current-password"
              onfocus="this.type='text'" onblur="this.type='password'"
-             style="margin-bottom:8px">
+             required style="margin-bottom:8px">
       {err_html}
       <button class="btn btn-primary" type="submit"
               style="width:100%;justify-content:center;margin-top:12px">
@@ -1118,14 +1126,27 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/login":
             length = int(self.headers.get("Content-Length", 0))
             raw    = self.rfile.read(length).decode()
-            # Parse application/x-www-form-urlencoded
             fields = parse_qs(raw)
-            token  = fields.get("token", [""])[0].strip()
-            cfg    = load_config()
-            in_url = cfg.get("in_url", "")
+            token  = fields.get("token",  [""])[0].strip()
+            in_url = fields.get("in_url", [""])[0].strip().rstrip("/")
+            # Normalise: ensure path ends with /api/v1
+            if in_url and not in_url.endswith("/api/v1"):
+                in_url = in_url.rstrip("/") + "/api/v1"
             # Validate token against IN
             ok, msg = test_connection(in_url, token)
             if ok:
+                # Persist URL (and token) into config so the app is ready to use
+                cfg = load_config()
+                changed = False
+                if in_url and cfg.get("in_url") != in_url:
+                    cfg["in_url"] = in_url
+                    changed = True
+                if token and cfg.get("in_token") != token:
+                    cfg["in_token"] = token
+                    changed = True
+                if changed:
+                    save_config(cfg)
+                    log.info("Config updated from login form")
                 sid = create_session(token)
                 self.send_response(302)
                 self.set_session_cookie(sid)
@@ -1133,9 +1154,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 log.info(f"Login successful from {self.address_string()}")
             else:
-                log.warning(f"Failed login attempt from {self.address_string()}: {msg}")
+                log.warning(f"Failed login from {self.address_string()}: {msg}")
                 self.send_html(build_login_page(
-                    error=f"Invalid token or cannot reach Invoice Ninja ({msg})"))
+                    error=f"Invalid token or cannot reach Invoice Ninja ({msg})",
+                    prefill_url=in_url))
             return
 
         # All other POST routes require auth
