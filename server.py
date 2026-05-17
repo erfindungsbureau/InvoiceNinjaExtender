@@ -96,10 +96,11 @@ def test_connection(base_url, token):
         return False, str(e)
 
 def get_categories(base_url, token):
-    """Return list of {id, name} for all expense categories."""
+    """Return list of {id, name} for active (non-deleted) expense categories only."""
     try:
         cats = api_get_all(base_url, token, "/expense_categories")
-        return [{"id": c["id"], "name": c.get("name","?")} for c in cats]
+        return [{"id": c["id"], "name": c.get("name","?")}
+                for c in cats if not c.get("is_deleted", False)]
     except Exception:
         return []
 
@@ -111,7 +112,8 @@ def load_data(cfg, year):
     year_str = str(year)
 
     cats_map = {c["id"]: c.get("name","—")
-                for c in api_get_all(base, token, "/expense_categories")}
+                for c in api_get_all(base, token, "/expense_categories")
+                if not c.get("is_deleted", False)}
     vendors_map = {v["id"]: v.get("name","—")
                    for v in api_get_all(base, token, "/vendors")}
     clients_map = {c["id"]: c.get("name","—")
