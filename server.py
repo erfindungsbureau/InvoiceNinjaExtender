@@ -5,7 +5,7 @@ Standalone HTTP server — generates PDF income statements from Invoice Ninja da
 UI language is detected automatically from the Invoice Ninja company settings.
 """
 
-import io, os, json, logging
+import io, os, json, logging, time, secrets
 import requests as req
 from datetime import date, datetime
 from collections import defaultdict
@@ -197,6 +197,42 @@ def t(key, lang="en"):
     """Return translated string for key in given language, falling back to English."""
     return TRANSLATIONS.get(lang, TRANSLATIONS["en"]).get(
         key, TRANSLATIONS["en"].get(key, key))
+
+# ── Session management ────────────────────────────────────────────────────────
+SESSION_LIFETIME = 8 * 3600  # 8 hours
+_sessions: dict = {}  # session_id -> {"token": str, "expires": float}
+
+def create_session(token: str) -> str:
+    sid = secrets.token_urlsafe(32)
+    _sessions[sid] = {"token": token, "expires": time.time() + SESSION_LIFETIME}
+    # Purge expired sessions
+    expired = [k for k, v in _sessions.items() if v["expires"] < time.time()]
+    for k in expired:
+        del _sessions[k]
+    return sid
+
+def get_session(sid: str | None):
+    if not sid:
+        return None
+    s = _sessions.get(sid)
+    if not s:
+        return None
+    if time.time() > s["expires"]:
+        del _sessions[sid]
+        return None
+    return s
+
+def delete_session(sid: str):
+    _sessions.pop(sid, None)
+
+def parse_cookies(raw: str) -> dict:
+    cookies = {}
+    for part in (raw or "").split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            cookies[k.strip()] = v.strip()
+    return cookies
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 C_DARK   = colors.HexColor("#1a1a2e")
@@ -708,6 +744,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
     <nav>
       <a href="/" class="{'active' if active=='export' else ''}">{nav_export}</a>
       <a href="/settings" class="{'active' if active=='settings' else ''}">{nav_settings}</a>
+      <a href="/logout" style="opacity:.5">⏻</a>
     </nav>
   </div>
   <div class="body">
@@ -896,11 +933,87 @@ window.addEventListener('DOMContentLoaded',loadCats);
 </script>
 """
 
+# ── Login page ────────────────────────────────────────────────────────────────
+def build_login_page(error: str = "") -> str:
+    err_html = (f'<div class="alert alert-err" style="display:block">✗ {error}</div>'
+                if error else "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login – InvoiceNinjaExtender</title>
+<style>
+{COMMON_CSS}
+.login-wrap {{ max-width: 400px; margin: 80px auto; background: #fff;
+               border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,.12);
+               overflow: hidden }}
+.login-head {{ background: #1a1a2e; color: #fff; padding: 28px 32px; text-align: center }}
+.login-head h1 {{ font-size: 1.3rem; font-weight: 700; margin-bottom: 4px }}
+.login-head p  {{ font-size: .8rem; opacity: .6 }}
+.login-body {{ padding: 28px 32px }}
+.login-body p  {{ font-size: .85rem; color: #555; margin-bottom: 18px; line-height: 1.5 }}
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-head">
+    <h1>📊 InvoiceNinjaExtender</h1>
+    <p>Financial Report Export</p>
+  </div>
+  <div class="login-body">
+    <p>Enter your <strong>Invoice Ninja API token</strong> to sign in.<br>
+       Find it under <em>Settings → API Tokens</em> in Invoice Ninja.</p>
+    <form method="POST" action="/login">
+      <label>API Token</label>
+      <input type="password" name="token" placeholder="••••••••••••"
+             autofocus autocomplete="current-password"
+             onfocus="this.type='text'" onblur="this.type='password'"
+             style="margin-bottom:8px">
+      {err_html}
+      <button class="btn btn-primary" type="submit"
+              style="width:100%;justify-content:center;margin-top:12px">
+        Sign in
+      </button>
+    </form>
+  </div>
+</div>
+</body>
+</html>"""
+
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info(f"{self.address_string()} {fmt % args}")
 
+    # ── Auth helpers ──────────────────────────────────────────────────────────
+    def get_session_id(self) -> str | None:
+        cookies = parse_cookies(self.headers.get("Cookie", ""))
+        return cookies.get("session")
+
+    def check_auth(self) -> bool:
+        """Return True if request has a valid session, else redirect to /login."""
+        sid = self.get_session_id()
+        if get_session(sid):
+            return True
+        self.send_response(302)
+        self.send_header("Location", "/login")
+        self.end_headers()
+        return False
+
+    def set_session_cookie(self, sid: str):
+        self.send_header(
+            "Set-Cookie",
+            f"session={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_LIFETIME}"
+        )
+
+    def clear_session_cookie(self):
+        self.send_header(
+            "Set-Cookie",
+            "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+        )
+
+    # ── Response helpers ──────────────────────────────────────────────────────
     def send_json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(code)
@@ -925,8 +1038,26 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         path   = parsed.path
-        cfg    = load_config()
-        lang   = get_in_language(cfg)
+
+        # Public routes (no auth required)
+        if path == "/login":
+            self.send_html(build_login_page())
+            return
+
+        if path == "/logout":
+            delete_session(self.get_session_id())
+            self.send_response(302)
+            self.clear_session_cookie()
+            self.send_header("Location", "/login")
+            self.end_headers()
+            return
+
+        # All other routes require a valid session
+        if not self.check_auth():
+            return
+
+        cfg  = load_config()
+        lang = get_in_language(cfg)
 
         if path in ("/", "/index.html"):
             cur  = date.today().year
@@ -983,6 +1114,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path == "/login":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length).decode()
+            # Parse application/x-www-form-urlencoded
+            fields = parse_qs(raw)
+            token  = fields.get("token", [""])[0].strip()
+            cfg    = load_config()
+            in_url = cfg.get("in_url", "")
+            # Validate token against IN
+            ok, msg = test_connection(in_url, token)
+            if ok:
+                sid = create_session(token)
+                self.send_response(302)
+                self.set_session_cookie(sid)
+                self.send_header("Location", "/")
+                self.end_headers()
+                log.info(f"Login successful from {self.address_string()}")
+            else:
+                log.warning(f"Failed login attempt from {self.address_string()}: {msg}")
+                self.send_html(build_login_page(
+                    error=f"Invalid token or cannot reach Invoice Ninja ({msg})"))
+            return
+
+        # All other POST routes require auth
+        if not self.check_auth():
+            return
 
         if path == "/api/test":
             body = self.read_body()
