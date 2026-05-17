@@ -1,7 +1,7 @@
 services:
-  steuerexport:
+  invoiceninjaextender:
     build: .
-    container_name: in-steuerexport
+    container_name: invoiceninjaextender
     restart: unless-stopped
     ports:
       - "5757:5757"
