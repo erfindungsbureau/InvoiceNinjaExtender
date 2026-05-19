@@ -494,36 +494,46 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
         f"{name} · {firma} · {t('pdf_as_of', lang)}: {date.today().strftime('%d.%m.%Y')}", s_sub))
     story.append(HRFlowable(width=W, thickness=1.5, color=C_DARK, spaceAfter=6*mm))
 
-    # 1 — Revenue
+    # ── helper: keep section header glued to first content element ────────────
+    def section_block(hdr_flowable, content_flowables, spacer_after=6*mm):
+        """Yield flowables; header is kept with the first content item."""
+        if not content_flowables:
+            story.append(hdr_flowable)
+            return
+        # Header + spacer + first content = unbreakable unit
+        story.append(KeepTogether(
+            [hdr_flowable, Spacer(1, 2*mm)] + content_flowables[:1]
+        ))
+        # Remaining content flows normally
+        for fl in content_flowables[1:]:
+            story.append(fl)
+        story.append(Spacer(1, spacer_after))
+
+    # 1 — Revenue ──────────────────────────────────────────────────────────────
     rev_total = sum(p["amount"] for p in payments)
-    story.append(section_hdr(t("pdf_sec1", lang)))
-    story.append(Spacer(1, 2*mm))
     if payments:
         rows = [[fmt_date(p["date"]), Paragraph(p["client"], s_sm),
                  Paragraph(p["inv_num"], s_sm), chf(p["amount"])]
                 for p in payments]
-        story.append(data_table(rows, [22*mm, W*0.42, W*0.28, 28*mm],
+        sec1_content = [data_table(rows, [22*mm, W*0.42, W*0.28, 28*mm],
             header=[t("pdf_col_date",lang), t("pdf_col_client",lang),
                     t("pdf_col_invoice",lang), "CHF"],
             total_row=["","",Paragraph(t("pdf_total_revenue",lang),s_bold),
-                       chf(rev_total)]))
+                       chf(rev_total)])]
     else:
-        story.append(Paragraph(t("pdf_no_payments", lang), s_note))
-    story.append(Spacer(1, 6*mm))
+        sec1_content = [Paragraph(t("pdf_no_payments", lang), s_note)]
+    section_block(section_hdr(t("pdf_sec1", lang)), sec1_content)
 
-    # 2 — Expenses
+    # 2 — Expenses ─────────────────────────────────────────────────────────────
     exp_total, cat_totals = 0.0, {}
-    story.append(section_hdr(t("pdf_sec2", lang)))
-    story.append(Spacer(1, 2*mm))
-    if excl:
-        story.append(Paragraph(
-            f"{t('pdf_excluded', lang)} {', '.join(sorted(excl))}", s_note))
 
     uncategorized_label = t("pdf_uncategorized", lang)
     unassigned_label    = t("pdf_unassigned", lang)
     sorted_cats = sorted(expenses_by_cat.keys(),
         key=lambda c: ("z"+c if c in (uncategorized_label, unassigned_label) else c))
 
+    # Build category blocks first so we can attach the first one to the header
+    cat_blocks = []
     for cat in sorted_cats:
         items   = expenses_by_cat[cat]
         cat_sum = sum(e["amount"] for e in items)
@@ -552,11 +562,18 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
                 desc = f"{e['vendor']} — {e['notes']}"
             rows.append([fmt_date(e["date"]),
                          Paragraph(desc[:90], s_sm), chf(e["amount"])])
-        story.append(KeepTogether([
+        cat_blocks.append(KeepTogether([
             cat_hdr,
             data_table(rows, [22*mm, W-22*mm-26*mm, 26*mm]),
             Spacer(1, 3*mm)
         ]))
+
+    # Intro elements (excluded note) go before the first category
+    sec2_intro = []
+    if excl:
+        sec2_intro.append(Paragraph(
+            f"{t('pdf_excluded', lang)} {', '.join(sorted(excl))}", s_note))
+    sec2_intro += cat_blocks  # header glued to first block via section_block
 
     exp_tot = Table(
         [["", Paragraph(t("pdf_total_expenses", lang), s_bold), chf(exp_total)]],
@@ -569,15 +586,13 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
         ("BACKGROUND", (0,0),(-1,-1),C_MID),
         ("LINEABOVE",  (0,0),(-1,-1),1.0,C_DARK),
     ]))
-    story.append(exp_tot)
-    story.append(Spacer(1, 8*mm))
+    sec2_intro.append(exp_tot)
+    section_block(section_hdr(t("pdf_sec2", lang)), sec2_intro, spacer_after=8*mm)
 
-    # 3 — Result
+    # 3 — Result ───────────────────────────────────────────────────────────────
     profit = rev_total - exp_total
     pc = C_GREEN if profit >= 0 else C_RED
     pl = t("net_profit" if profit >= 0 else "net_loss", lang)
-    story.append(section_hdr(t("pdf_sec3", lang), bg=colors.HexColor("#16213e")))
-    story.append(Spacer(1, 2*mm))
     res = Table([
         [t("pdf_revenue", lang),         chf(rev_total)],
         [t("pdf_expenses_deduct", lang),  chf(exp_total)],
@@ -600,32 +615,30 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
         ("LINEABOVE",     (0,2),(-1,2),1.5,pc),
         ("LINEBELOW",     (0,2),(-1,2),1.5,pc),
     ]))
-    story.append(res)
-    story.append(Spacer(1, 8*mm))
+    # Section 3 is small — keep entire block together
+    section_block(
+        section_hdr(t("pdf_sec3", lang), bg=colors.HexColor("#16213e")),
+        [res], spacer_after=8*mm)
 
-    # 4 — Open receivables
-    story.append(section_hdr(t("pdf_sec4", lang),
-                              bg=colors.HexColor("#2d4a6e")))
-    story.append(Spacer(1, 2*mm))
+    # 4 — Open receivables ─────────────────────────────────────────────────────
     if open_invoices:
         open_total = sum(i["balance"] for i in open_invoices)
         rows = [[i["number"], Paragraph(i["client"], s_sm),
                  fmt_date(i["date"]), fmt_date(i["due_date"]),
                  chf(i["balance"])] for i in open_invoices]
-        story.append(data_table(rows, [25*mm, W*0.38, 22*mm, 22*mm, 26*mm],
+        sec4_content = [data_table(rows, [25*mm, W*0.38, 22*mm, 22*mm, 26*mm],
             header=[t("pdf_col_invoice_nr",lang), t("pdf_col_client",lang),
                     t("pdf_col_date",lang), t("pdf_col_due",lang),
                     t("pdf_col_outstanding",lang)],
             total_row=["","","",Paragraph(t("pdf_total_open",lang),s_bold),
-                        chf(open_total)]))
+                        chf(open_total)])]
     else:
-        story.append(Paragraph(t("pdf_no_open", lang), s_note))
-    story.append(Spacer(1, 8*mm))
+        sec4_content = [Paragraph(t("pdf_no_open", lang), s_note)]
+    section_block(
+        section_hdr(t("pdf_sec4", lang), bg=colors.HexColor("#2d4a6e")),
+        sec4_content, spacer_after=8*mm)
 
-    # 5 — Category summary
-    story.append(section_hdr(t("pdf_sec5", lang),
-                              bg=colors.HexColor("#374151")))
-    story.append(Spacer(1, 2*mm))
+    # 5 — Category summary ─────────────────────────────────────────────────────
     sum_rows = [[Paragraph(c, s_normal), chf(cat_totals[c])]
                 for c in sorted_cats]
     sum_rows.append([Paragraph(t("pdf_total", lang), s_bold), chf(exp_total)])
@@ -641,10 +654,11 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
         if i % 2 == 0:
             ss.append(("BACKGROUND",(0,i),(-1,i),C_LIGHT))
     sum_tbl.setStyle(TableStyle(ss))
-    story.append(sum_tbl)
+    section_block(
+        section_hdr(t("pdf_sec5", lang), bg=colors.HexColor("#374151")),
+        [sum_tbl], spacer_after=10*mm)
 
     # Footer
-    story.append(Spacer(1, 10*mm))
     story.append(HRFlowable(width=W, thickness=0.5,
                              color=colors.HexColor("#aaa")))
     story.append(Spacer(1, 2*mm))
