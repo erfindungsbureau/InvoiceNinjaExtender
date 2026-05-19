@@ -7,7 +7,7 @@ UI language is detected automatically from the Invoice Ninja company settings.
 
 import io, os, json, logging, time, secrets
 import requests as req
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from collections import defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
@@ -69,6 +69,17 @@ TRANSLATIONS = {
         "nav_export":           "Export",
         "nav_settings":         "Settings",
         "app_title":            "Financial Report Export",
+        # UI – nav
+        "nav_charts":           "Charts",
+        # UI – charts page
+        "chart_title":          "Expected Revenue from Time Tracking",
+        "chart_hint":           "Hours logged × hourly rate per day. Rate hierarchy: task → project → client.",
+        "chart_label_daily":    "Expected revenue (CHF)",
+        "chart_label_cumul":    "Cumulative (CHF)",
+        "chart_total":          "Total expected",
+        "chart_days":           "days with entries",
+        "chart_no_data":        "No time entries with a rate found for this year.",
+        "chart_loading":        "Loading time entries…",
         # UI – export page
         "label_tax_year":       "Tax Year",
         "hint_data_source":     "Data loaded directly from Invoice Ninja",
@@ -132,7 +143,17 @@ TRANSLATIONS = {
         # UI – nav / header
         "nav_export":           "Export",
         "nav_settings":         "Einstellungen",
+        "nav_charts":           "Grafiken",
         "app_title":            "Erfolgsrechnung Export",
+        # UI – charts page
+        "chart_title":          "Erwartete Einnahmen aus Zeiterfassung",
+        "chart_hint":           "Erfasste Stunden × Stundensatz pro Tag. Satzpriorität: Aufgabe → Projekt → Kunde.",
+        "chart_label_daily":    "Erwartete Einnahmen (CHF)",
+        "chart_label_cumul":    "Kumuliert (CHF)",
+        "chart_total":          "Total erwartet",
+        "chart_days":           "Tage mit Einträgen",
+        "chart_no_data":        "Keine Zeiteinträge mit Stundensatz für dieses Jahr gefunden.",
+        "chart_loading":        "Lade Zeiteinträge…",
         # UI – export page
         "label_tax_year":       "Steuerjahr",
         "hint_data_source":     "Daten direkt aus Invoice Ninja",
@@ -671,6 +692,203 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
     doc.build(story)
     return buf.getvalue()
 
+# ── Time-chart data ───────────────────────────────────────────────────────────
+def get_timechart_data(cfg, year):
+    """
+    Returns dict: { "YYYY-MM-DD": CHF_amount, ... }
+    Revenue = logged hours × rate.
+    Rate lookup hierarchy: task.rate → project.task_rate → client default_task_rate.
+    Entries with rate=0 are skipped (non-billable / no rate configured).
+    """
+    base     = cfg["in_url"]
+    token    = cfg["in_token"]
+    year_str = str(year)
+
+    projects = {p["id"]: p for p in api_get_all(base, token, "/projects")
+                if not p.get("is_deleted")}
+    clients  = {c["id"]: c for c in api_get_all(base, token, "/clients")
+                if not c.get("is_deleted")}
+
+    daily = defaultdict(float)
+
+    for task in api_get_all(base, token, "/tasks"):
+        if task.get("is_deleted"):
+            continue
+
+        # Rate hierarchy
+        rate = float(task.get("rate") or 0)
+        if not rate:
+            proj = projects.get(task.get("project_id") or "")
+            if proj:
+                rate = float(proj.get("task_rate") or 0)
+        if not rate:
+            cl = clients.get(task.get("client_id") or "")
+            if cl:
+                rate = float(
+                    cl.get("settings", {}).get("default_task_rate") or
+                    cl.get("rate") or 0)
+        if not rate:
+            continue  # no rate → skip
+
+        # Parse time_log — stored as JSON string or list
+        raw_log = task.get("time_log") or "[]"
+        if isinstance(raw_log, str):
+            try:
+                raw_log = json.loads(raw_log)
+            except Exception:
+                continue
+
+        for entry in raw_log:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            start_ts, end_ts = entry[0], entry[1]
+            if not start_ts or not end_ts:
+                continue  # running entry
+            try:
+                start_dt = datetime.fromtimestamp(int(start_ts))
+                end_ts   = int(end_ts)
+            except Exception:
+                continue
+            if start_dt.year != year:
+                continue
+            hours = (end_ts - int(start_ts)) / 3600.0
+            if hours <= 0:
+                continue
+            day_key = start_dt.strftime("%Y-%m-%d")
+            daily[day_key] += round(hours * rate, 2)
+
+    return dict(daily)
+
+# ── Chart page ────────────────────────────────────────────────────────────────
+def build_chart_body(lang="en"):
+    return f"""
+<label for="cyr">{t('label_tax_year', lang)}</label>
+<select id="cyr" onchange="loadChart()" style="width:auto;margin-bottom:20px">YEAR_OPTIONS</select>
+<div id="chart_status" style="color:#888;font-size:.875rem;margin-bottom:12px">{t('chart_loading', lang)}</div>
+<div id="stats" style="display:none;margin-bottom:16px" class="summary">
+  <div class="row total">
+    <span>{t('chart_total', lang)}</span><span id="stat_total"></span>
+  </div>
+  <div class="row">
+    <span>{t('chart_days', lang)}</span><span id="stat_days"></span>
+  </div>
+</div>
+<canvas id="myChart" style="display:none;width:100%;max-height:360px"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+const LBL_DAILY  = {json.dumps(t('chart_label_daily', lang))};
+const LBL_CUMUL  = {json.dumps(t('chart_label_cumul', lang))};
+const LBL_NODATA = {json.dumps(t('chart_no_data', lang))};
+
+let myChart = null;
+
+function fmt(v){{
+  return "CHF "+v.toLocaleString('de-CH',{{minimumFractionDigits:2,maximumFractionDigits:2}});
+}}
+
+async function loadChart(){{
+  const yr = document.getElementById('cyr').value;
+  document.getElementById('chart_status').textContent = '{t('chart_loading', lang)}';
+  document.getElementById('stats').style.display = 'none';
+  document.getElementById('myChart').style.display = 'none';
+  if(myChart){{ myChart.destroy(); myChart = null; }}
+
+  const r = await fetch('/api/timechart?year='+yr);
+  const d = await r.json();
+
+  if(d.error){{
+    document.getElementById('chart_status').textContent = '✗ '+d.error;
+    return;
+  }}
+
+  const dates = Object.keys(d.daily).sort();
+  if(!dates.length){{
+    document.getElementById('chart_status').textContent = LBL_NODATA;
+    return;
+  }}
+
+  // Fill every day of the year (0 for empty days)
+  const start = new Date(yr+'-01-01');
+  const end   = new Date(yr+'-12-31');
+  const allDates=[], dailyVals=[], cumulVals=[];
+  let cum=0;
+  for(let dt=new Date(start); dt<=end; dt.setDate(dt.getDate()+1)){{
+    const k = dt.toISOString().slice(0,10);
+    const v = d.daily[k]||0;
+    allDates.push(k.slice(5)); // MM-DD
+    dailyVals.push(v);
+    cum += v;
+    cumulVals.push(parseFloat(cum.toFixed(2)));
+  }}
+
+  document.getElementById('chart_status').textContent = '';
+  document.getElementById('stats').style.display = 'block';
+  document.getElementById('stat_total').textContent = fmt(d.total);
+  document.getElementById('stat_days').textContent  = dates.length;
+  document.getElementById('myChart').style.display  = 'block';
+
+  const ctx = document.getElementById('myChart').getContext('2d');
+  myChart = new Chart(ctx, {{
+    data: {{
+      labels: allDates,
+      datasets: [
+        {{
+          type: 'bar',
+          label: LBL_DAILY,
+          data: dailyVals,
+          backgroundColor: 'rgba(22,33,62,0.75)',
+          borderRadius: 2,
+          yAxisID: 'y',
+        }},
+        {{
+          type: 'line',
+          label: LBL_CUMUL,
+          data: cumulVals,
+          borderColor: '#2d6a4f',
+          backgroundColor: 'rgba(45,106,79,0.08)',
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.3,
+          yAxisID: 'y2',
+        }}
+      ]
+    }},
+    options: {{
+      responsive: true,
+      interaction: {{ mode:'index', intersect:false }},
+      plugins: {{
+        tooltip: {{
+          callbacks: {{
+            label: ctx => ctx.dataset.label+': '+fmt(ctx.parsed.y)
+          }}
+        }},
+        legend: {{ position:'bottom' }}
+      }},
+      scales: {{
+        x: {{
+          ticks: {{ maxTicksLimit:12, maxRotation:0 }},
+          grid: {{ display:false }}
+        }},
+        y: {{
+          position:'left',
+          title: {{ display:true, text:'CHF / Tag' }},
+          ticks: {{ callback: v => 'CHF '+v.toLocaleString('de-CH') }}
+        }},
+        y2: {{
+          position:'right',
+          title: {{ display:true, text:'Kumuliert CHF' }},
+          grid: {{ drawOnChartArea:false }},
+          ticks: {{ callback: v => 'CHF '+v.toLocaleString('de-CH') }}
+        }}
+      }}
+    }}
+  }});
+}}
+window.addEventListener('DOMContentLoaded', loadChart);
+</script>
+"""
+
 # ── HTML templates ─────────────────────────────────────────────────────────────
 COMMON_CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0 }
@@ -744,6 +962,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
     html_lang = lang  # e.g. "de", "en"
     nav_export   = t("nav_export", lang)
     nav_settings = t("nav_settings", lang)
+    nav_charts   = t("nav_charts", lang)
     app_title    = t("app_title", lang)
     return f"""<!DOCTYPE html>
 <html lang="{html_lang}">
@@ -762,6 +981,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
     </div>
     <nav>
       <a href="/" class="{'active' if active=='export' else ''}">{nav_export}</a>
+      <a href="/charts" class="{'active' if active=='charts' else ''}">{nav_charts}</a>
       <a href="/settings" class="{'active' if active=='settings' else ''}">{nav_settings}</a>
       <a href="/logout" style="opacity:.5">⏻</a>
     </nav>
@@ -1105,6 +1325,25 @@ class Handler(BaseHTTPRequestHandler):
             html = render_page(t("app_title", lang), "export", body,
                                cfg.get("firma",""), lang)
             self.send_html(html)
+
+        elif path == "/charts":
+            cur  = date.today().year
+            opts = "\n".join(
+                f'<option value="{y}"{"selected" if y==cur else ""}>{y}</option>'
+                for y in range(cur, 2017, -1))
+            body = build_chart_body(lang).replace("YEAR_OPTIONS", opts)
+            html = render_page(t("nav_charts", lang), "charts", body,
+                               cfg.get("firma",""), lang)
+            self.send_html(html)
+
+        elif path == "/api/timechart":
+            year = int(params.get("year", [date.today().year])[0])
+            try:
+                daily = get_timechart_data(cfg, year)
+                total = round(sum(daily.values()), 2)
+                self.send_json({"year": year, "daily": daily, "total": total})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
 
         elif path == "/settings":
             body = build_settings_body(cfg, lang)
