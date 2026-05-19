@@ -71,6 +71,20 @@ TRANSLATIONS = {
         "app_title":            "Financial Report Export",
         # UI – nav
         "nav_charts":           "Charts",
+        "nav_tasks":            "Open Tasks",
+        # UI – open tasks page
+        "tasks_title":          "Open Tasks",
+        "tasks_hint":           "All tasks not yet marked as Done, grouped by project.",
+        "tasks_col_task":       "Task",
+        "tasks_col_status":     "Status",
+        "tasks_col_hours":      "Hours",
+        "tasks_col_rate":       "Rate",
+        "tasks_col_expected":   "Expected CHF",
+        "tasks_no_rate":        "no rate",
+        "tasks_total":          "Total",
+        "tasks_no_open":        "No open tasks found.",
+        "tasks_loading":        "Loading tasks…",
+        "tasks_no_project":     "No project assigned",
         # UI – charts page
         "chart_title":          "Expected Revenue from Time Tracking",
         "chart_hint":           "Hours logged × hourly rate per day. Rate hierarchy: task → project → client.",
@@ -144,7 +158,21 @@ TRANSLATIONS = {
         "nav_export":           "Export",
         "nav_settings":         "Einstellungen",
         "nav_charts":           "Grafiken",
+        "nav_tasks":            "Offene Aufgaben",
         "app_title":            "Erfolgsrechnung Export",
+        # UI – open tasks page
+        "tasks_title":          "Offene Aufgaben",
+        "tasks_hint":           "Alle Aufgaben ohne Status «Done», gruppiert nach Projekt.",
+        "tasks_col_task":       "Aufgabe",
+        "tasks_col_status":     "Status",
+        "tasks_col_hours":      "Stunden",
+        "tasks_col_rate":       "Satz",
+        "tasks_col_expected":   "Erwartet CHF",
+        "tasks_no_rate":        "kein Satz",
+        "tasks_total":          "Total",
+        "tasks_no_open":        "Keine offenen Aufgaben gefunden.",
+        "tasks_loading":        "Lade Aufgaben…",
+        "tasks_no_project":     "Kein Projekt zugewiesen",
         # UI – charts page
         "chart_title":          "Erwartete Einnahmen aus Zeiterfassung",
         "chart_hint":           "Erfasste Stunden × Stundensatz pro Tag. Satzpriorität: Aufgabe → Projekt → Kunde.",
@@ -692,6 +720,77 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
     doc.build(story)
     return buf.getvalue()
 
+# ── Open tasks ────────────────────────────────────────────────────────────────
+DONE_STATUS_ID = "l4zbq2dprO"   # IN task status "Done"
+
+def get_open_tasks(cfg):
+    """
+    Returns list of open tasks (status != Done), each with:
+      name, status_name, project_name, hours_logged, rate, expected_chf
+    Grouped-ready (sorted by project_name, then task name).
+    """
+    base  = cfg["in_url"]
+    token = cfg["in_token"]
+
+    # Lookups
+    statuses = {s["id"]: s.get("name","?")
+                for s in api_get_all(base, token, "/task_statuses")}
+    projects = {p["id"]: p for p in api_get_all(base, token, "/projects")
+                if not p.get("is_deleted")}
+    clients  = {c["id"]: c for c in api_get_all(base, token, "/clients")
+                if not c.get("is_deleted")}
+
+    result = []
+    for task in api_get_all(base, token, "/tasks"):
+        if task.get("is_deleted"):
+            continue
+        if task.get("status_id") == DONE_STATUS_ID:
+            continue
+
+        # Hours from time_log
+        raw_log = task.get("time_log") or "[]"
+        if isinstance(raw_log, str):
+            try:
+                raw_log = json.loads(raw_log)
+            except Exception:
+                raw_log = []
+        hours = 0.0
+        for entry in raw_log:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                s, e = entry[0], entry[1]
+                if s and e:
+                    hours += (int(e) - int(s)) / 3600.0
+
+        # Rate hierarchy
+        rate = float(task.get("rate") or 0)
+        if not rate:
+            proj = projects.get(task.get("project_id") or "")
+            if proj:
+                rate = float(proj.get("task_rate") or 0)
+        if not rate:
+            cl = clients.get(task.get("client_id") or "")
+            if cl:
+                rate = float(
+                    cl.get("settings", {}).get("default_task_rate") or
+                    cl.get("rate") or 0)
+
+        proj_name = ""
+        proj_id   = task.get("project_id") or ""
+        if proj_id in projects:
+            proj_name = projects[proj_id].get("name","")
+
+        result.append({
+            "name":         task.get("description") or task.get("number","?"),
+            "status_name":  statuses.get(task.get("status_id",""), "?"),
+            "project_name": proj_name,
+            "hours":        round(hours, 2),
+            "rate":         rate,
+            "expected_chf": round(hours * rate, 2),
+        })
+
+    result.sort(key=lambda x: (x["project_name"] or "\xff", x["name"]))
+    return result
+
 # ── Time-chart data ───────────────────────────────────────────────────────────
 def get_timechart_data(cfg, year):
     """
@@ -758,6 +857,103 @@ def get_timechart_data(cfg, year):
             daily[day_key] += round(hours * rate, 2)
 
     return dict(daily)
+
+# ── Open tasks page ───────────────────────────────────────────────────────────
+def build_tasks_body(lang="en"):
+    return f"""
+<p class="hint" style="margin-bottom:20px">{t('tasks_hint', lang)}</p>
+<div id="tasks_status" style="color:#888;font-size:.875rem">{t('tasks_loading', lang)}</div>
+<div id="tasks_root"></div>
+<script>
+const LBL_TASK     = {json.dumps(t('tasks_col_task',     lang))};
+const LBL_STATUS   = {json.dumps(t('tasks_col_status',   lang))};
+const LBL_HOURS    = {json.dumps(t('tasks_col_hours',    lang))};
+const LBL_RATE     = {json.dumps(t('tasks_col_rate',     lang))};
+const LBL_EXPECTED = {json.dumps(t('tasks_col_expected', lang))};
+const LBL_NO_RATE  = {json.dumps(t('tasks_no_rate',      lang))};
+const LBL_TOTAL    = {json.dumps(t('tasks_total',        lang))};
+const LBL_EMPTY    = {json.dumps(t('tasks_no_open',      lang))};
+const LBL_NOPROJ   = {json.dumps(t('tasks_no_project',   lang))};
+
+function fmtH(h){{
+  const hh=Math.floor(h), mm=Math.round((h-hh)*60);
+  return hh+'h '+(mm<10?'0':'')+mm+'m';
+}}
+function fmtC(v){{
+  return v?'CHF '+v.toLocaleString('de-CH',{{minimumFractionDigits:2,maximumFractionDigits:2}}):'—';
+}}
+
+async function loadTasks(){{
+  const r=await fetch('/api/opentasks');
+  const tasks=await r.json();
+  document.getElementById('tasks_status').textContent='';
+  const root=document.getElementById('tasks_root');
+
+  if(!tasks.length){{
+    root.innerHTML='<p style="color:#888;font-size:.875rem">'+LBL_EMPTY+'</p>';
+    return;
+  }}
+
+  // Group by project
+  const groups={{}};
+  tasks.forEach(tk=>{{
+    const g=tk.project_name||LBL_NOPROJ;
+    if(!groups[g]) groups[g]=[];
+    groups[g].push(tk);
+  }});
+
+  let grandTotal=0, grandHours=0;
+  Object.entries(groups).forEach(([proj, items])=>{{
+    const projTotal=items.reduce((s,tk)=>s+tk.expected_chf,0);
+    const projHours=items.reduce((s,tk)=>s+tk.hours,0);
+    grandTotal+=projTotal; grandHours+=projHours;
+
+    let rows='';
+    items.forEach(tk=>{{
+      const rate=tk.rate?'CHF '+tk.rate+'/h':LBL_NO_RATE;
+      rows+=`<tr>
+        <td>${{tk.name}}</td>
+        <td><span style="font-size:.75rem;padding:2px 8px;border-radius:99px;background:#f0f0f5;color:#555">${{tk.status_name}}</span></td>
+        <td>${{fmtH(tk.hours)}}</td>
+        <td style="color:#888">${{rate}}</td>
+        <td>${{tk.expected_chf?fmtC(tk.expected_chf):'—'}}</td>
+      </tr>`;
+    }});
+
+    root.innerHTML+=`
+      <div class="summary" style="margin-bottom:16px">
+        <div class="cat-section" style="display:flex;justify-content:space-between;align-items:center">
+          <span>${{proj}}</span>
+          <span style="font-size:.8rem;font-weight:600;color:#555">
+            ${{fmtH(projHours)}}${{projTotal?' · '+fmtC(projTotal):''}}
+          </span>
+        </div>
+        <table>
+          <thead style="background:#f0f0f5">
+            <tr>
+              <th style="text-align:left;padding:5px 16px;font-size:.78rem">${{LBL_TASK}}</th>
+              <th style="text-align:left;padding:5px 16px;font-size:.78rem">${{LBL_STATUS}}</th>
+              <th style="text-align:right;padding:5px 16px;font-size:.78rem">${{LBL_HOURS}}</th>
+              <th style="text-align:right;padding:5px 16px;font-size:.78rem">${{LBL_RATE}}</th>
+              <th style="text-align:right;padding:5px 16px;font-size:.78rem">${{LBL_EXPECTED}}</th>
+            </tr>
+          </thead>
+          <tbody>${{rows}}</tbody>
+        </table>
+      </div>`;
+  }});
+
+  // Grand total
+  root.innerHTML+=`
+    <div class="row total" style="border-radius:8px;border:1.5px solid #dde0ee">
+      <span><strong>${{LBL_TOTAL}}</strong></span>
+      <span><strong>${{fmtH(grandHours)}}${{grandTotal?' · '+fmtC(grandTotal):''}}
+      </strong></span>
+    </div>`;
+}}
+window.addEventListener('DOMContentLoaded', loadTasks);
+</script>
+"""
 
 # ── Chart page ────────────────────────────────────────────────────────────────
 def build_chart_body(lang="en"):
@@ -963,6 +1159,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
     nav_export   = t("nav_export", lang)
     nav_settings = t("nav_settings", lang)
     nav_charts   = t("nav_charts", lang)
+    nav_tasks    = t("nav_tasks", lang)
     app_title    = t("app_title", lang)
     return f"""<!DOCTYPE html>
 <html lang="{html_lang}">
@@ -982,6 +1179,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
     <nav>
       <a href="/" class="{'active' if active=='export' else ''}">{nav_export}</a>
       <a href="/charts" class="{'active' if active=='charts' else ''}">{nav_charts}</a>
+      <a href="/tasks" class="{'active' if active=='tasks' else ''}">{nav_tasks}</a>
       <a href="/settings" class="{'active' if active=='settings' else ''}">{nav_settings}</a>
       <a href="/logout" style="opacity:.5">⏻</a>
     </nav>
@@ -1325,6 +1523,17 @@ class Handler(BaseHTTPRequestHandler):
             html = render_page(t("app_title", lang), "export", body,
                                cfg.get("firma",""), lang)
             self.send_html(html)
+
+        elif path == "/tasks":
+            html = render_page(t("nav_tasks", lang), "tasks",
+                               build_tasks_body(lang), cfg.get("firma",""), lang)
+            self.send_html(html)
+
+        elif path == "/api/opentasks":
+            try:
+                self.send_json(get_open_tasks(cfg))
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
 
         elif path == "/charts":
             cur  = date.today().year
