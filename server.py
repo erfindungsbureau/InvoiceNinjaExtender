@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "firma":               "My Company",
     "name":                "First Last",
     "excluded_categories": [],
+    "language":            "auto",   # "auto" | "en" | "de"
     "port":                5757,
 }
 
@@ -287,17 +288,21 @@ def get_categories(base_url, token):
 
 def get_in_language(cfg):
     """
-    Detect the language configured in Invoice Ninja via the company API.
-    Returns 'de', 'en', etc.  Falls back to 'en' on any error.
-    IN language_id: 1=English, 3=Deutsch, 4=Deutsch (older versions)
+    Return UI language. Priority:
+      1. config "language" if set to "en" or "de"
+      2. auto-detect from IN company API
+      3. fallback "en"
     """
+    override = cfg.get("language", "auto")
+    if override in TRANSLATIONS:
+        return override
+    # Auto-detect from IN
     try:
         r = req.get(f"{cfg['in_url']}/company",
                     headers=make_headers(cfg["in_token"]),
                     timeout=8)
         if r.status_code == 200:
             data = r.json().get("data", {})
-            # language_id may be nested under settings
             lang_id = (data.get("settings", {}).get("language_id")
                        or data.get("language_id")
                        or "1")
@@ -849,6 +854,14 @@ def build_settings_body(cfg, lang="en"):
     </div>
   </div>
   <div class="divider"></div>
+  <h3>{"Sprache" if lang=="de" else "Language"}</h3>
+  <label>{"Anzeigesprache" if lang=="de" else "Display language"}</label>
+  <select id="language" style="width:auto;margin-bottom:16px">
+    <option value="auto"  {"selected" if cfg.get("language","auto")=="auto"  else ""}>{"Automatisch (aus Invoice Ninja)" if lang=="de" else "Auto (from Invoice Ninja)"}</option>
+    <option value="de"    {"selected" if cfg.get("language","auto")=="de"    else ""}>Deutsch</option>
+    <option value="en"    {"selected" if cfg.get("language","auto")=="en"    else ""}>English</option>
+  </select>
+  <div class="divider"></div>
   <h3>{t('h_categories', lang)} <span style="font-weight:400;font-size:.85rem;color:#888">— {t('hint_categories', lang)}</span></h3>
   <div id="cats_loading" style="color:#888;font-size:.875rem;margin-bottom:16px">{t('loading_cats', lang)}</div>
   <div class="check-grid" id="cats"></div>
@@ -916,6 +929,7 @@ async function saveSettings(){{
     in_token:  document.getElementById('in_token').value,
     firma:     document.getElementById('firma').value,
     name:      document.getElementById('name').value,
+    language:  document.getElementById('language').value,
     excluded_categories: excl,
   }};
   const r=await fetch('/api/settings',{{method:'POST',
@@ -936,6 +950,7 @@ window.addEventListener('DOMContentLoaded',loadCats);
 # ── Login page ────────────────────────────────────────────────────────────────
 def build_login_page(error: str = "", prefill_url: str = "") -> str:
     cfg      = load_config()
+    lang     = get_in_language(cfg)
     url_val  = prefill_url or cfg.get("in_url", "")
     # Don't pre-fill the placeholder default
     if "example.com" in url_val:
@@ -948,6 +963,7 @@ def build_login_page(error: str = "", prefill_url: str = "") -> str:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login – InvoiceNinjaExtender</title>
+<meta http-equiv="content-language" content="{lang}">
 <style>
 {COMMON_CSS}
 .login-wrap {{ max-width: 420px; margin: 60px auto; background: #fff;
@@ -967,10 +983,9 @@ def build_login_page(error: str = "", prefill_url: str = "") -> str:
     <p>Financial Report Export</p>
   </div>
   <div class="login-body">
-    <p>Sign in with your <strong>Invoice Ninja API token</strong>.<br>
-       Find it under <em>Settings → API Tokens</em> in Invoice Ninja.</p>
+    <p>{"Melde dich mit deinem <strong>Invoice Ninja API-Token</strong> an.<br>Zu finden unter <em>Einstellungen → API-Token</em> in Invoice Ninja." if lang=="de" else "Sign in with your <strong>Invoice Ninja API token</strong>.<br>Find it under <em>Settings → API Tokens</em> in Invoice Ninja."}</p>
     <form method="POST" action="/login">
-      <label>Invoice Ninja URL</label>
+      <label>{"Invoice Ninja URL" if lang=="de" else "Invoice Ninja URL"}</label>
       <input type="url" name="in_url" placeholder="https://invoices.example.com/api/v1"
              value="{url_val}" autocomplete="url" required>
       <label>API Token</label>
@@ -981,7 +996,7 @@ def build_login_page(error: str = "", prefill_url: str = "") -> str:
       {err_html}
       <button class="btn btn-primary" type="submit"
               style="width:100%;justify-content:center;margin-top:12px">
-        Sign in
+        {"Anmelden" if lang=="de" else "Sign in"}
       </button>
     </form>
   </div>
@@ -1179,6 +1194,7 @@ class Handler(BaseHTTPRequestHandler):
                     "in_token":            body.get("in_token", cfg["in_token"]),
                     "firma":               body.get("firma", cfg["firma"]),
                     "name":                body.get("name", cfg["name"]),
+                    "language":            body.get("language", cfg.get("language","auto")),
                     "excluded_categories": body.get("excluded_categories",
                                                     cfg["excluded_categories"]),
                 })
