@@ -980,7 +980,7 @@ def get_timesheet_data(cfg, project_id, start_date=None, end_date=None):
             continue
 
         rate = float(task.get("rate") or 0) or proj_rate
-        desc = (task.get("description") or task.get("number","?")).split("\n")[0].strip()
+        task_desc = (task.get("description") or task.get("number","?")).split("\n")[0].strip()
 
         raw_log = task.get("time_log") or "[]"
         if isinstance(raw_log, str):
@@ -1007,6 +1007,8 @@ def get_timesheet_data(cfg, project_id, start_date=None, end_date=None):
                 continue
             if end_date and day > end_date:
                 continue
+            entry_desc = entry[2].strip() if len(entry) >= 3 and isinstance(entry[2], str) else ""
+            desc = entry_desc or task_desc
             key = (day, desc)
             if key not in rows_by_key:
                 rows_by_key[key] = {"date": day, "description": desc,
