@@ -21,6 +21,7 @@ from reportlab.platypus import (
     TableStyle, HRFlowable, KeepTogether
 )
 from reportlab.lib.enums import TA_RIGHT, TA_CENTER
+from reportlab.pdfgen.canvas import Canvas
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -116,6 +117,7 @@ TRANSLATIONS = {
         "pdf_timesheet_client": "Client",
         "pdf_timesheet_period": "Period",
         "pdf_timesheet_all":    "All entries",
+        "timesheet_section":    "Time Entries",
         # UI – export page
         "label_tax_year":       "Tax Year",
         "hint_data_source":     "Data loaded directly from Invoice Ninja",
@@ -174,6 +176,7 @@ TRANSLATIONS = {
         "pdf_total":            "Total",
         "pdf_created_on":       "Created on",
         "pdf_data_source":      "Data source: Invoice Ninja",
+        "pdf_page":             "Page {page} of {total}",
     },
     "de": {
         # UI – nav / header
@@ -226,6 +229,7 @@ TRANSLATIONS = {
         "pdf_timesheet_client": "Kunde",
         "pdf_timesheet_period": "Zeitraum",
         "pdf_timesheet_all":    "Alle Einträge",
+        "timesheet_section":    "Zeiterfassung",
         # UI – export page
         "label_tax_year":       "Steuerjahr",
         "hint_data_source":     "Daten direkt aus Invoice Ninja",
@@ -284,6 +288,7 @@ TRANSLATIONS = {
         "pdf_total":            "Total",
         "pdf_created_on":       "Erstellt am",
         "pdf_data_source":      "Datenquelle: Invoice Ninja",
+        "pdf_page":             "Seite {page} von {total}",
     },
 }
 
@@ -502,6 +507,31 @@ def fmt_date(d):
         return datetime.strptime(d[:10], "%Y-%m-%d").strftime("%d.%m.%Y")
     except Exception:
         return d[:10]
+
+def page_number_canvas(label):
+    """Returns a Canvas subclass that draws 'label.format(page=, total=)'
+    centered at the bottom of every page (two-pass: total page count)."""
+    class _Canvas(Canvas):
+        def __init__(self, *args, **kwargs):
+            Canvas.__init__(self, *args, **kwargs)
+            self._saved_page_states = []
+
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total = len(self._saved_page_states)
+            for state in self._saved_page_states:
+                self.__dict__.update(state)
+                self.setFont("Helvetica", 7)
+                self.setFillColor(colors.HexColor("#888888"))
+                self.drawCentredString(
+                    A4[0]/2, 10*mm,
+                    label.format(page=self._pageNumber, total=total))
+                Canvas.showPage(self)
+            Canvas.save(self)
+    return _Canvas
 
 def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
     buf = io.BytesIO()
@@ -761,7 +791,7 @@ def build_pdf(cfg, year, payments, expenses_by_cat, open_invoices, lang="en"):
         f"{name} · {firma} · {t('pdf_data_source', lang)} ({base_host})",
         s_foot))
 
-    doc.build(story)
+    doc.build(story, canvasmaker=page_number_canvas(t("pdf_page", lang)))
     return buf.getvalue()
 
 # ── Open tasks ────────────────────────────────────────────────────────────────
@@ -997,10 +1027,22 @@ def get_timesheet_data(cfg, project_id, start_date=None, end_date=None):
     }
 
 def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
+    """
+    Layout follows the look of the Erfindungsbureau invoice design
+    (Source Sans / Helvetica, near-black text, thin hairline rules,
+    bold right-aligned meta table) plus a "Page X of Y" footer.
+    """
     buf = io.BytesIO()
     W   = A4[0] - 40*mm
     firma = cfg.get("firma","")
     name  = cfg.get("name","")
+
+    C_TEXT  = colors.HexColor("#1a1a1a")
+    C_G55   = colors.HexColor("#555555")
+    C_G66   = colors.HexColor("#666666")
+    C_G99   = colors.HexColor("#999999")
+    C_GDD   = colors.HexColor("#dddddd")
+    C_GAA   = colors.HexColor("#aaaaaa")
 
     pdf_title = t("pdf_timesheet_title", lang)
     proj_name = data["project_name"]
@@ -1009,16 +1051,17 @@ def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
         topMargin=20*mm, bottomMargin=20*mm,
         title=f"{pdf_title} – {proj_name}", author=name)
 
-    s_title = ParagraphStyle("ti", fontSize=22, leading=28, textColor=C_DARK,
-                              fontName="Helvetica-Bold", spaceAfter=2*mm)
-    s_sub   = ParagraphStyle("su", fontSize=11, textColor=colors.HexColor("#555555"),
-                              fontName="Helvetica", spaceAfter=6*mm)
-    s_sm    = ParagraphStyle("sm", fontSize=8.5, leading=11,
-                              textColor=colors.HexColor("#444444"), fontName="Helvetica")
-    s_bold  = ParagraphStyle("bo", fontSize=9, fontName="Helvetica-Bold", textColor=C_DARK)
-    s_note  = ParagraphStyle("no", fontSize=9, leading=12,
-                              textColor=colors.HexColor("#666666"), fontName="Helvetica")
-    s_foot  = ParagraphStyle("ft", fontSize=7, textColor=colors.HexColor("#888888"),
+    s_title = ParagraphStyle("ti", fontSize=20, leading=24, textColor=C_TEXT,
+                              fontName="Helvetica-Bold", spaceAfter=5*mm)
+    s_meta  = ParagraphStyle("me", fontSize=9, leading=14, textColor=C_TEXT,
+                              fontName="Helvetica-Bold")
+    s_meta_v = ParagraphStyle("mv", parent=s_meta, alignment=TA_RIGHT)
+    s_sm    = ParagraphStyle("sm", fontSize=9, leading=12, textColor=C_TEXT,
+                              fontName="Helvetica")
+    s_bold  = ParagraphStyle("bo", fontSize=9, fontName="Helvetica-Bold", textColor=C_TEXT)
+    s_section = ParagraphStyle("se", fontSize=9, fontName="Helvetica-Bold", textColor=C_TEXT)
+    s_note  = ParagraphStyle("no", fontSize=9, leading=12, textColor=C_G66, fontName="Helvetica")
+    s_foot  = ParagraphStyle("ft", fontSize=7, textColor=C_G55,
                               fontName="Helvetica", alignment=TA_CENTER)
 
     if start_date or end_date:
@@ -1026,13 +1069,38 @@ def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
     else:
         period = t("pdf_timesheet_all", lang)
 
-    story = [
-        Paragraph(f"{pdf_title} – {proj_name}", s_title),
-        Paragraph(
-            f"{t('pdf_timesheet_client', lang)}: {data['client_name']} · "
-            f"{t('pdf_timesheet_period', lang)}: {period}", s_sub),
-        HRFlowable(width=W, thickness=1.5, color=C_DARK, spaceAfter=6*mm),
-    ]
+    story = [Paragraph(pdf_title, s_title)]
+
+    # Meta table — bold label / right-aligned value, like the invoice's meta-table
+    meta_tbl = Table([
+        [Paragraph(t("pdf_timesheet_client", lang), s_meta),
+         Paragraph(data["client_name"], s_meta_v)],
+        [Paragraph(t("pdf_timesheet_project", lang), s_meta),
+         Paragraph(proj_name, s_meta_v)],
+        [Paragraph(t("pdf_timesheet_period", lang), s_meta),
+         Paragraph(period, s_meta_v)],
+    ], colWidths=[W*0.3, W*0.7])
+    meta_tbl.setStyle(TableStyle([
+        ("TOPPADDING",    (0,0),(-1,-1), 1),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 1),
+        ("LEFTPADDING",   (0,0),(-1,-1), 0),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 0),
+    ]))
+    story.append(meta_tbl)
+    story.append(Spacer(1, 6*mm))
+
+    # Section label — bold top rule + thin bottom rule, like .section-label
+    sec_tbl = Table([[Paragraph(t("timesheet_section", lang), s_section)]],
+                     colWidths=[W])
+    sec_tbl.setStyle(TableStyle([
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 0),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 0),
+        ("LINEABOVE", (0,0),(-1,0), 0.75, C_TEXT),
+        ("LINEBELOW", (0,0),(-1,0), 0.5,  C_G99),
+    ]))
+    story.append(sec_tbl)
 
     rows = data["rows"]
     if rows:
@@ -1051,39 +1119,37 @@ def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
                f"{total_hours:.2f}", "", chf(total_amount)]]),
             colWidths=[22*mm, W-22*mm-22*mm-26*mm-30*mm, 22*mm, 26*mm, 30*mm],
             repeatRows=1)
+        last = len(table_rows) + 1
         style = [
             ("FONTNAME",     (0,0),(-1,-1), "Helvetica"),
-            ("FONTSIZE",     (0,0),(-1,-1), 8.5),
-            ("LEADING",      (0,0),(-1,-1), 11),
-            ("TOPPADDING",   (0,0),(-1,-1), 2.5),
-            ("BOTTOMPADDING",(0,0),(-1,-1), 2.5),
-            ("LEFTPADDING",  (0,0),(-1,-1), 4),
-            ("RIGHTPADDING", (0,0),(-1,-1), 4),
+            ("FONTSIZE",     (0,0),(-1,-1), 9),
+            ("LEADING",      (0,0),(-1,-1), 12),
+            ("TOPPADDING",   (0,0),(-1,-1), 3),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 3),
+            ("LEFTPADDING",  (0,0),(-1,-1), 0),
+            ("RIGHTPADDING", (0,0),(-1,-1), 6),
             ("ALIGN",        (2,0),(-1,-1), "RIGHT"),
-            ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+            ("VALIGN",       (0,0),(-1,-1), "TOP"),
             ("FONTNAME",     (0,0),(-1,0), "Helvetica-Bold"),
-            ("BACKGROUND",   (0,0),(-1,0), C_MID),
-            ("LINEBELOW",    (0,0),(-1,0), 0.5, C_ACCENT),
-            ("LINEABOVE",    (0,-1),(-1,-1), 0.8, C_ACCENT),
-            ("FONTNAME",     (0,-1),(-1,-1), "Helvetica-Bold"),
-            ("BACKGROUND",   (0,-1),(-1,-1), C_MID),
+            ("LINEBELOW",    (0,0),(-1,0), 0.5, C_G99),
+            ("LINEBELOW",    (0,1),(-1,last-1), 0.25, C_GDD),
+            ("LINEABOVE",    (0,last),(-1,last), 0.5, C_TEXT),
+            ("FONTNAME",     (0,last),(-1,last), "Helvetica-Bold"),
+            ("TOPPADDING",   (0,last),(-1,last), 4),
         ]
-        for i in range(len(table_rows)):
-            if i % 2 == 0:
-                style.append(("BACKGROUND",(0,i+1),(-1,i+1),C_LIGHT))
         tbl.setStyle(TableStyle(style))
         story.append(tbl)
     else:
+        story.append(Spacer(1, 3*mm))
         story.append(Paragraph(t("timesheet_no_data", lang), s_note))
 
     story.append(Spacer(1, 8*mm))
-    story.append(HRFlowable(width=W, thickness=0.5, color=colors.HexColor("#aaa")))
-    story.append(Spacer(1, 2*mm))
+    story.append(HRFlowable(width=W, thickness=0.5, color=C_GAA, spaceAfter=2*mm))
     story.append(Paragraph(
         f"{t('pdf_created_on', lang)} {date.today().strftime('%d.%m.%Y')} · {name} · {firma}",
         s_foot))
 
-    doc.build(story)
+    doc.build(story, canvasmaker=page_number_canvas(t("pdf_page", lang)))
     return buf.getvalue()
 
 # ── Open tasks page ───────────────────────────────────────────────────────────
