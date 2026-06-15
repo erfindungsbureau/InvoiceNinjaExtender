@@ -5,7 +5,7 @@ Standalone HTTP server — generates PDF income statements from Invoice Ninja da
 UI language is detected automatically from the Invoice Ninja company settings.
 """
 
-import io, os, json, logging, time, secrets
+import io, os, json, logging, re, time, secrets
 import requests as req
 from datetime import date, datetime, timezone
 from collections import defaultdict
@@ -72,6 +72,7 @@ TRANSLATIONS = {
         # UI – nav
         "nav_charts":           "Charts",
         "nav_tasks":            "Open Tasks",
+        "nav_timesheet":        "Timesheet",
         # UI – open tasks page
         "tasks_title":          "Open Tasks",
         "tasks_hint":           "All tasks not yet marked as Done, grouped by project.",
@@ -94,6 +95,27 @@ TRANSLATIONS = {
         "chart_days":           "days with entries",
         "chart_no_data":        "No time entries with a rate found for this year.",
         "chart_loading":        "Loading time entries…",
+        # UI – timesheet page
+        "timesheet_title":      "Timesheet",
+        "timesheet_hint":       "Select a project and optional date range to generate a timesheet for the client.",
+        "label_project":        "Project",
+        "label_start_date":     "From",
+        "label_end_date":       "To",
+        "timesheet_select_project": "Please select a project.",
+        "timesheet_col_date":   "Date",
+        "timesheet_col_task":   "Description",
+        "timesheet_col_hours":  "Hours",
+        "timesheet_col_rate":   "Rate",
+        "timesheet_col_amount": "Amount CHF",
+        "timesheet_total":      "Total",
+        "timesheet_no_data":    "No time entries found for this period.",
+        "timesheet_loading":    "Loading time entries…",
+        "btn_download_timesheet": "Download Timesheet PDF",
+        "pdf_timesheet_title":  "Timesheet",
+        "pdf_timesheet_project": "Project",
+        "pdf_timesheet_client": "Client",
+        "pdf_timesheet_period": "Period",
+        "pdf_timesheet_all":    "All entries",
         # UI – export page
         "label_tax_year":       "Tax Year",
         "hint_data_source":     "Data loaded directly from Invoice Ninja",
@@ -159,6 +181,7 @@ TRANSLATIONS = {
         "nav_settings":         "Einstellungen",
         "nav_charts":           "Grafiken",
         "nav_tasks":            "Offene Aufgaben",
+        "nav_timesheet":        "Stundenliste",
         "app_title":            "Erfolgsrechnung Export",
         # UI – open tasks page
         "tasks_title":          "Offene Aufgaben",
@@ -182,6 +205,27 @@ TRANSLATIONS = {
         "chart_days":           "Tage mit Einträgen",
         "chart_no_data":        "Keine Zeiteinträge mit Stundensatz für dieses Jahr gefunden.",
         "chart_loading":        "Lade Zeiteinträge…",
+        # UI – timesheet page
+        "timesheet_title":      "Stundenliste",
+        "timesheet_hint":       "Projekt und optional Zeitraum wählen, um eine Stundenliste für den Kunden zu erstellen.",
+        "label_project":        "Projekt",
+        "label_start_date":     "Von",
+        "label_end_date":       "Bis",
+        "timesheet_select_project": "Bitte ein Projekt auswählen.",
+        "timesheet_col_date":   "Datum",
+        "timesheet_col_task":   "Beschreibung",
+        "timesheet_col_hours":  "Stunden",
+        "timesheet_col_rate":   "Satz",
+        "timesheet_col_amount": "Betrag CHF",
+        "timesheet_total":      "Total",
+        "timesheet_no_data":    "Keine Zeiteinträge für diesen Zeitraum gefunden.",
+        "timesheet_loading":    "Lade Zeiteinträge…",
+        "btn_download_timesheet": "Stundenliste als PDF",
+        "pdf_timesheet_title":  "Stundenliste",
+        "pdf_timesheet_project": "Projekt",
+        "pdf_timesheet_client": "Kunde",
+        "pdf_timesheet_period": "Zeitraum",
+        "pdf_timesheet_all":    "Alle Einträge",
         # UI – export page
         "label_tax_year":       "Steuerjahr",
         "hint_data_source":     "Daten direkt aus Invoice Ninja",
@@ -858,6 +902,190 @@ def get_timechart_data(cfg, year):
 
     return dict(daily)
 
+# ── Timesheet ("Stundenliste") ───────────────────────────────────────────────
+def get_projects_list(cfg):
+    """Returns a list of active projects: {id, name, client_name}, sorted by name."""
+    base, token = cfg["in_url"], cfg["in_token"]
+    clients = {c["id"]: c for c in api_get_all(base, token, "/clients")
+               if not c.get("is_deleted")}
+    result = []
+    for p in api_get_all(base, token, "/projects"):
+        if p.get("is_deleted"):
+            continue
+        client = clients.get(p.get("client_id") or "")
+        result.append({
+            "id":          p["id"],
+            "name":        p.get("name","?"),
+            "client_name": client.get("name","") if client else "",
+        })
+    result.sort(key=lambda x: x["name"].lower())
+    return result
+
+def get_timesheet_data(cfg, project_id, start_date=None, end_date=None):
+    """
+    Returns dict with project/client name and a list of timesheet rows
+    (date, description, hours, rate, amount), one row per day+task,
+    sorted by date. start_date/end_date are "YYYY-MM-DD" strings (inclusive).
+    """
+    base, token = cfg["in_url"], cfg["in_token"]
+
+    projects = {p["id"]: p for p in api_get_all(base, token, "/projects")
+                if not p.get("is_deleted")}
+    clients  = {c["id"]: c for c in api_get_all(base, token, "/clients")
+                if not c.get("is_deleted")}
+
+    proj = projects.get(project_id, {})
+    client = clients.get(proj.get("client_id") or "")
+
+    proj_rate = float(proj.get("task_rate") or 0)
+    if not proj_rate and client:
+        proj_rate = float(client.get("settings", {}).get("default_task_rate")
+                           or client.get("rate") or 0)
+
+    rows_by_key = {}
+    for task in api_get_all(base, token, "/tasks"):
+        if task.get("is_deleted"):
+            continue
+        if task.get("project_id") != project_id:
+            continue
+
+        rate = float(task.get("rate") or 0) or proj_rate
+        desc = (task.get("description") or task.get("number","?")).split("\n")[0].strip()
+
+        raw_log = task.get("time_log") or "[]"
+        if isinstance(raw_log, str):
+            try:
+                raw_log = json.loads(raw_log)
+            except Exception:
+                raw_log = []
+
+        for entry in raw_log:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            start_ts, end_ts = entry[0], entry[1]
+            if not start_ts or not end_ts:
+                continue  # running entry
+            try:
+                start_dt = datetime.fromtimestamp(int(start_ts))
+                hours = (int(end_ts) - int(start_ts)) / 3600.0
+            except Exception:
+                continue
+            if hours <= 0:
+                continue
+            day = start_dt.strftime("%Y-%m-%d")
+            if start_date and day < start_date:
+                continue
+            if end_date and day > end_date:
+                continue
+            key = (day, desc)
+            if key not in rows_by_key:
+                rows_by_key[key] = {"date": day, "description": desc,
+                                     "hours": 0.0, "rate": rate}
+            rows_by_key[key]["hours"] += hours
+
+    rows = []
+    for r in rows_by_key.values():
+        r["hours"] = round(r["hours"], 2)
+        r["amount"] = round(r["hours"] * r["rate"], 2)
+        rows.append(r)
+    rows.sort(key=lambda x: (x["date"], x["description"]))
+
+    return {
+        "project_name": proj.get("name",""),
+        "client_name":  client.get("name","") if client else "",
+        "rows":         rows,
+    }
+
+def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
+    buf = io.BytesIO()
+    W   = A4[0] - 40*mm
+    firma = cfg.get("firma","")
+    name  = cfg.get("name","")
+
+    pdf_title = t("pdf_timesheet_title", lang)
+    proj_name = data["project_name"]
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=20*mm, rightMargin=20*mm,
+        topMargin=20*mm, bottomMargin=20*mm,
+        title=f"{pdf_title} – {proj_name}", author=name)
+
+    s_title = ParagraphStyle("ti", fontSize=22, leading=28, textColor=C_DARK,
+                              fontName="Helvetica-Bold", spaceAfter=2*mm)
+    s_sub   = ParagraphStyle("su", fontSize=11, textColor=colors.HexColor("#555555"),
+                              fontName="Helvetica", spaceAfter=6*mm)
+    s_sm    = ParagraphStyle("sm", fontSize=8.5, leading=11,
+                              textColor=colors.HexColor("#444444"), fontName="Helvetica")
+    s_bold  = ParagraphStyle("bo", fontSize=9, fontName="Helvetica-Bold", textColor=C_DARK)
+    s_note  = ParagraphStyle("no", fontSize=9, leading=12,
+                              textColor=colors.HexColor("#666666"), fontName="Helvetica")
+    s_foot  = ParagraphStyle("ft", fontSize=7, textColor=colors.HexColor("#888888"),
+                              fontName="Helvetica", alignment=TA_CENTER)
+
+    if start_date or end_date:
+        period = f"{fmt_date(start_date) or '…'} – {fmt_date(end_date) or '…'}"
+    else:
+        period = t("pdf_timesheet_all", lang)
+
+    story = [
+        Paragraph(f"{pdf_title} – {proj_name}", s_title),
+        Paragraph(
+            f"{t('pdf_timesheet_client', lang)}: {data['client_name']} · "
+            f"{t('pdf_timesheet_period', lang)}: {period}", s_sub),
+        HRFlowable(width=W, thickness=1.5, color=C_DARK, spaceAfter=6*mm),
+    ]
+
+    rows = data["rows"]
+    if rows:
+        table_rows = [[fmt_date(r["date"]), Paragraph(r["description"], s_sm),
+                        f"{r['hours']:.2f}",
+                        chf(r["rate"]) if r["rate"] else "—",
+                        chf(r["amount"]) if r["amount"] else "—"]
+                       for r in rows]
+        total_hours  = sum(r["hours"] for r in rows)
+        total_amount = sum(r["amount"] for r in rows)
+        tbl = Table(
+            ([[t("timesheet_col_date",lang), t("timesheet_col_task",lang),
+               t("timesheet_col_hours",lang), t("timesheet_col_rate",lang),
+               t("timesheet_col_amount",lang)]] + table_rows +
+             [["", Paragraph(t("timesheet_total",lang), s_bold),
+               f"{total_hours:.2f}", "", chf(total_amount)]]),
+            colWidths=[22*mm, W-22*mm-22*mm-26*mm-30*mm, 22*mm, 26*mm, 30*mm],
+            repeatRows=1)
+        style = [
+            ("FONTNAME",     (0,0),(-1,-1), "Helvetica"),
+            ("FONTSIZE",     (0,0),(-1,-1), 8.5),
+            ("LEADING",      (0,0),(-1,-1), 11),
+            ("TOPPADDING",   (0,0),(-1,-1), 2.5),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 2.5),
+            ("LEFTPADDING",  (0,0),(-1,-1), 4),
+            ("RIGHTPADDING", (0,0),(-1,-1), 4),
+            ("ALIGN",        (2,0),(-1,-1), "RIGHT"),
+            ("VALIGN",       (0,0),(-1,-1), "MIDDLE"),
+            ("FONTNAME",     (0,0),(-1,0), "Helvetica-Bold"),
+            ("BACKGROUND",   (0,0),(-1,0), C_MID),
+            ("LINEBELOW",    (0,0),(-1,0), 0.5, C_ACCENT),
+            ("LINEABOVE",    (0,-1),(-1,-1), 0.8, C_ACCENT),
+            ("FONTNAME",     (0,-1),(-1,-1), "Helvetica-Bold"),
+            ("BACKGROUND",   (0,-1),(-1,-1), C_MID),
+        ]
+        for i in range(len(table_rows)):
+            if i % 2 == 0:
+                style.append(("BACKGROUND",(0,i+1),(-1,i+1),C_LIGHT))
+        tbl.setStyle(TableStyle(style))
+        story.append(tbl)
+    else:
+        story.append(Paragraph(t("timesheet_no_data", lang), s_note))
+
+    story.append(Spacer(1, 8*mm))
+    story.append(HRFlowable(width=W, thickness=0.5, color=colors.HexColor("#aaa")))
+    story.append(Spacer(1, 2*mm))
+    story.append(Paragraph(
+        f"{t('pdf_created_on', lang)} {date.today().strftime('%d.%m.%Y')} · {name} · {firma}",
+        s_foot))
+
+    doc.build(story)
+    return buf.getvalue()
+
 # ── Open tasks page ───────────────────────────────────────────────────────────
 def build_tasks_body(lang="en"):
     return f"""
@@ -1085,6 +1313,138 @@ window.addEventListener('DOMContentLoaded', loadChart);
 </script>
 """
 
+# ── Timesheet page ────────────────────────────────────────────────────────────
+def build_timesheet_body(lang="en"):
+    return f"""
+<p class="hint" style="margin-bottom:20px">{t('timesheet_hint', lang)}</p>
+<div class="field-group">
+  <div>
+    <label for="ts_project">{t('label_project', lang)}</label>
+    <select id="ts_project" onchange="loadTimesheet()"></select>
+  </div>
+</div>
+<div class="field-group">
+  <div>
+    <label for="ts_start">{t('label_start_date', lang)}</label>
+    <input id="ts_start" type="date" onchange="loadTimesheet()">
+  </div>
+  <div>
+    <label for="ts_end">{t('label_end_date', lang)}</label>
+    <input id="ts_end" type="date" onchange="loadTimesheet()">
+  </div>
+</div>
+<div id="ts_status" style="color:#888;font-size:.875rem">{t('timesheet_loading', lang)}</div>
+<div id="ts_root"></div>
+<button class="btn btn-primary" id="ts_dl" onclick="downloadTimesheet()"
+        style="width:100%;justify-content:center;margin-top:20px" disabled>
+  {t('btn_download_timesheet', lang)}
+</button>
+<script>
+const LBL_DATE     = {json.dumps(t('timesheet_col_date',     lang))};
+const LBL_TASK     = {json.dumps(t('timesheet_col_task',     lang))};
+const LBL_HOURS    = {json.dumps(t('timesheet_col_hours',    lang))};
+const LBL_RATE     = {json.dumps(t('timesheet_col_rate',     lang))};
+const LBL_AMOUNT   = {json.dumps(t('timesheet_col_amount',   lang))};
+const LBL_TOTAL    = {json.dumps(t('timesheet_total',        lang))};
+const LBL_EMPTY    = {json.dumps(t('timesheet_no_data',      lang))};
+const LBL_SELECT   = {json.dumps(t('timesheet_select_project', lang))};
+const LBL_LOADING  = {json.dumps(t('timesheet_loading',      lang))};
+
+function fmtC(v){{
+  return v?'CHF '+v.toLocaleString('de-CH',{{minimumFractionDigits:2,maximumFractionDigits:2}}):'—';
+}}
+function fmtDate(d){{
+  const [y,m,day]=d.split('-');
+  return day+'.'+m+'.'+y;
+}}
+
+async function loadProjects(){{
+  const r=await fetch('/api/projects');
+  const projects=await r.json();
+  const sel=document.getElementById('ts_project');
+  sel.innerHTML='<option value="">—</option>'+projects.map(p=>
+    `<option value="${{p.id}}">${{p.name}}${{p.client_name?' ('+p.client_name+')':''}}</option>`
+  ).join('');
+  if(projects.length===1) {{ sel.value=projects[0].id; loadTimesheet(); }}
+}}
+
+async function loadTimesheet(){{
+  const pid=document.getElementById('ts_project').value;
+  const root=document.getElementById('ts_root');
+  const status=document.getElementById('ts_status');
+  const dlBtn=document.getElementById('ts_dl');
+  root.innerHTML='';
+  dlBtn.disabled=true;
+  if(!pid){{
+    status.textContent=LBL_SELECT;
+    return;
+  }}
+  status.textContent=LBL_LOADING;
+  const start=document.getElementById('ts_start').value;
+  const end=document.getElementById('ts_end').value;
+  let url='/api/timesheet?project_id='+encodeURIComponent(pid);
+  if(start) url+='&start='+start;
+  if(end) url+='&end='+end;
+  const r=await fetch(url);
+  const d=await r.json();
+  status.textContent='';
+
+  if(!d.rows.length){{
+    root.innerHTML='<p style="color:#888;font-size:.875rem">'+LBL_EMPTY+'</p>';
+    return;
+  }}
+  dlBtn.disabled=false;
+
+  let rows='', totalHours=0, totalAmount=0;
+  d.rows.forEach(r=>{{
+    totalHours+=r.hours; totalAmount+=r.amount;
+    rows+=`<tr>
+      <td>${{fmtDate(r.date)}}</td>
+      <td>${{r.description}}</td>
+      <td style="text-align:right">${{r.hours.toFixed(2)}}</td>
+      <td style="text-align:right;color:#888">${{fmtC(r.rate)}}</td>
+      <td style="text-align:right">${{fmtC(r.amount)}}</td>
+    </tr>`;
+  }});
+
+  root.innerHTML=`
+    <div class="summary">
+      <table>
+        <thead style="background:#f0f0f5">
+          <tr>
+            <th style="text-align:left;padding:5px 16px;font-size:.78rem">${{LBL_DATE}}</th>
+            <th style="text-align:left;padding:5px 16px;font-size:.78rem">${{LBL_TASK}}</th>
+            <th style="text-align:right;padding:5px 16px;font-size:.78rem">${{LBL_HOURS}}</th>
+            <th style="text-align:right;padding:5px 16px;font-size:.78rem">${{LBL_RATE}}</th>
+            <th style="text-align:right;padding:5px 16px;font-size:.78rem">${{LBL_AMOUNT}}</th>
+          </tr>
+        </thead>
+        <tbody>${{rows}}</tbody>
+      </table>
+      <div class="row total">
+        <span>${{LBL_TOTAL}}</span>
+        <span>${{totalHours.toFixed(2)}} h · ${{fmtC(totalAmount)}}</span>
+      </div>
+    </div>`;
+}}
+
+function downloadTimesheet(){{
+  const pid=document.getElementById('ts_project').value;
+  if(!pid) return;
+  const start=document.getElementById('ts_start').value;
+  const end=document.getElementById('ts_end').value;
+  let url='/timesheet/export?project_id='+encodeURIComponent(pid);
+  if(start) url+='&start='+start;
+  if(end) url+='&end='+end;
+  const a=document.createElement('a');
+  a.href=url; a.download='Stundenliste.pdf';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}}
+
+window.addEventListener('DOMContentLoaded', loadProjects);
+</script>
+"""
+
 # ── HTML templates ─────────────────────────────────────────────────────────────
 COMMON_CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0 }
@@ -1160,6 +1520,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
     nav_settings = t("nav_settings", lang)
     nav_charts   = t("nav_charts", lang)
     nav_tasks    = t("nav_tasks", lang)
+    nav_timesheet = t("nav_timesheet", lang)
     app_title    = t("app_title", lang)
     return f"""<!DOCTYPE html>
 <html lang="{html_lang}">
@@ -1180,6 +1541,7 @@ def render_page(title, active, body_html, firma="", lang="en"):
       <a href="/" class="{'active' if active=='export' else ''}">{nav_export}</a>
       <a href="/charts" class="{'active' if active=='charts' else ''}">{nav_charts}</a>
       <a href="/tasks" class="{'active' if active=='tasks' else ''}">{nav_tasks}</a>
+      <a href="/timesheet" class="{'active' if active=='timesheet' else ''}">{nav_timesheet}</a>
       <a href="/settings" class="{'active' if active=='settings' else ''}">{nav_settings}</a>
       <a href="/logout" style="opacity:.5">⏻</a>
     </nav>
@@ -1577,6 +1939,48 @@ class Handler(BaseHTTPRequestHandler):
                 pdf_bytes = build_pdf(cfg, year, payments, exp_by_cat,
                                       open_inv, lang)
                 fname = f"FinancialReport_{year}.pdf"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", len(pdf_bytes))
+                self.end_headers()
+                self.wfile.write(pdf_bytes)
+                log.info(f"PDF {fname} delivered ({len(pdf_bytes)//1024} KB)")
+            except Exception as e:
+                log.error(f"PDF error: {e}")
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/timesheet":
+            html = render_page(t("nav_timesheet", lang), "timesheet",
+                               build_timesheet_body(lang), cfg.get("firma",""), lang)
+            self.send_html(html)
+
+        elif path == "/api/projects":
+            try:
+                self.send_json(get_projects_list(cfg))
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/api/timesheet":
+            project_id = params.get("project_id", [""])[0]
+            start = params.get("start", [None])[0]
+            end   = params.get("end", [None])[0]
+            try:
+                self.send_json(get_timesheet_data(cfg, project_id, start, end))
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/timesheet/export":
+            project_id = params.get("project_id", [""])[0]
+            start = params.get("start", [None])[0]
+            end   = params.get("end", [None])[0]
+            try:
+                data = get_timesheet_data(cfg, project_id, start, end)
+                pdf_bytes = build_timesheet_pdf(cfg, data, start, end, lang)
+                safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_",
+                                    data["project_name"] or project_id).strip("_")
+                fname = f"Stundenliste_{safe_name or 'Projekt'}.pdf"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/pdf")
                 self.send_header("Content-Disposition",
