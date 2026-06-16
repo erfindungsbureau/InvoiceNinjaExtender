@@ -117,6 +117,7 @@ TRANSLATIONS = {
         "pdf_timesheet_client": "Client",
         "pdf_timesheet_period": "Period",
         "pdf_timesheet_all":    "All entries",
+        "pdf_timesheet_projnr": "Project No.",
         "timesheet_section":    "Time Entries",
         # UI – export page
         "label_tax_year":       "Tax Year",
@@ -229,6 +230,7 @@ TRANSLATIONS = {
         "pdf_timesheet_client": "Kunde",
         "pdf_timesheet_period": "Zeitraum",
         "pdf_timesheet_all":    "Alle Einträge",
+        "pdf_timesheet_projnr": "Projekt-Nr.",
         "timesheet_section":    "Zeiterfassung",
         # UI – export page
         "label_tax_year":       "Steuerjahr",
@@ -1023,9 +1025,11 @@ def get_timesheet_data(cfg, project_id, start_date=None, end_date=None):
     rows.sort(key=lambda x: (x["date"], x["description"]))
 
     return {
-        "project_name": proj.get("name",""),
-        "client_name":  client.get("name","") if client else "",
-        "rows":         rows,
+        "project_name":   proj.get("name",""),
+        "project_nr":     proj.get("custom_value1","").strip(),   # custom field "Projekt-Nr."
+        "client_name":    client.get("name","") if client else "",
+        "client_zusatz":  client.get("custom_value1","").strip() if client else "",  # "Zusatz Firmenname"
+        "rows":           rows,
     }
 
 def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
@@ -1074,14 +1078,25 @@ def build_timesheet_pdf(cfg, data, start_date, end_date, lang="en"):
     story = [Paragraph(pdf_title, s_title)]
 
     # Meta table — bold label / right-aligned value, like the invoice's meta-table
-    meta_tbl = Table([
+    client_name_full = data["client_name"]
+    if data.get("client_zusatz"):
+        client_name_full = f"{client_name_full}<br/>{data['client_zusatz']}"
+    meta_rows = [
         [Paragraph(t("pdf_timesheet_client", lang), s_meta),
-         Paragraph(data["client_name"], s_meta_v)],
+         Paragraph(client_name_full, s_meta_v)],
         [Paragraph(t("pdf_timesheet_project", lang), s_meta),
          Paragraph(proj_name, s_meta_v)],
-        [Paragraph(t("pdf_timesheet_period", lang), s_meta),
-         Paragraph(period, s_meta_v)],
-    ], colWidths=[W*0.3, W*0.7])
+    ]
+    if data.get("project_nr"):
+        meta_rows.append([
+            Paragraph(t("pdf_timesheet_projnr", lang), s_meta),
+            Paragraph(data["project_nr"], s_meta_v),
+        ])
+    meta_rows.append([
+        Paragraph(t("pdf_timesheet_period", lang), s_meta),
+        Paragraph(period, s_meta_v),
+    ])
+    meta_tbl = Table(meta_rows, colWidths=[W*0.3, W*0.7])
     meta_tbl.setStyle(TableStyle([
         ("TOPPADDING",    (0,0),(-1,-1), 1),
         ("BOTTOMPADDING", (0,0),(-1,-1), 1),
